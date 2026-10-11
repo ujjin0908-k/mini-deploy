@@ -56,6 +56,12 @@ js = (repo / "web/dashboard/app.js").read_text(encoding="utf-8")
 danger = [w for w in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function") if w in js]
 check(not danger, "dashboard JS never builds HTML from data" + (f" (found {danger})" if danger else ""))
 
+dash_html = (repo / "web/dashboard/index.html").read_text(encoding="utf-8")
+csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', dash_html)
+check(bool(csp) and "script-src 'self'" in csp.group(1) and "object-src 'none'" in csp.group(1),
+      "dashboard has a Content-Security-Policy that only allows its own scripts")
+check(not re.search(r"<script(?![^>]*\bsrc=)", dash_html), "dashboard has no inline script (the CSP would block it)")
+
 css = (repo / "web/theme/pink.css").read_text(encoding="utf-8")
 check("prefers-reduced-motion" in css, "animation respects prefers-reduced-motion")
 check(":focus-visible" in css, "keyboard focus is visible")
@@ -189,8 +195,10 @@ def check(ok, msg):
 ev = d["events"]
 check(len(ev) == 3, f"3 well-formed lines kept, 2 dropped (kept {len(ev)})")
 check(all(e["app"] != "Bad_App" for e in ev), "invalid app name is dropped")
-check(any("<script>" in e["detail"] for e in ev), "markup stays as plain data (rendered with textContent)")
-check(all(len(e["detail"]) <= 120 for e in ev), "detail is cut to 120 characters")
+check(all("<" not in e["detail"] and ">" not in e["detail"] for e in ev), "no markup at all reaches the page")
+fails = [e["detail"] for e in ev if e["result"] == "fail"]
+check(fails == ["failed", "failed"], f"a failure shows only a reason word, never its text (got {fails})")
+check(all("/" not in e["detail"] for e in ev), "no paths reach the page")
 check(d["attention"] == ["demo-site"], f"failed app is flagged (got {d['attention']})")
 sys.exit(1 if bad else 0)
 PY
@@ -252,6 +260,55 @@ for app in dashboard demo-site mini-deploy; do
       && ok "$app$path is revalidated, so a deploy shows up at once" || bad "$app$path has no Cache-Control: no-cache"
   done
 done
+
+curl -s -m 5 -I --resolve demo-site.localhost:8080:127.0.0.1 http://demo-site.localhost:8080/ | grep -qi '^x-content-type-options: nosniff' \
+  && ok "apps are served with X-Content-Type-Options: nosniff" || bad "no nosniff header"
+
+echo
+echo "== 7. the refresh hooks really run (deploy, failure, rollback of the dashboard) =="
+# The other suites switch the hooks off. Here they are on, and nothing calls
+# dashboard.py by hand in between, so only the hooks can make these pass.
+HK=hooktest-$$
+live_json() { curl -s -m 5 --resolve dashboard.localhost:8080:127.0.0.1 http://dashboard.localhost:8080/data.json; }
+jq_py() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+mkdir -p "$SRC/hk-good"; echo '<h1>hook test</h1>' > "$SRC/hk-good/index.html"
+mkdir -p "$SRC/hk-bad"; echo hi > "$SRC/hk-bad/index.html"; echo 'TOKEN=abc' > "$SRC/hk-bad/.env"
+
+python3 "$REPO/scripts/deploy.py" deploy $HK "$SRC/hk-good" >/dev/null 2>&1
+live_json | jq_py "'$HK' in [a['name'] for a in d['apps']]" | grep -q True \
+  && ok "a deploy refreshed the dashboard by itself" || bad "new app did not appear after deploy"
+
+python3 "$REPO/scripts/deploy.py" deploy $HK "$SRC/hk-bad" >/dev/null 2>&1 && bad "the .env deploy was accepted"
+live_json | jq_py "'$HK' in d['attention']" | grep -q True \
+  && ok "a FAILED deploy refreshed it too: the app needs a look" || bad "failure did not reach the dashboard"
+reason=$(live_json | jq_py "[e['detail'] for e in d['events'] if e['app']=='$HK' and e['result']=='fail'][-1]")
+[ "$reason" = "refused: unsafe file" ] && ok "the LAN sees only the reason: '$reason'" || bad "failure detail was: $reason"
+
+python3 "$REPO/scripts/deploy.py" deploy $HK "$SRC/hk-good" >/dev/null 2>&1
+live_json | jq_py "'$HK' in d['attention']" | grep -q False \
+  && ok "a later success clears 'needs a look'" || bad "attention did not clear"
+
+# rolling the dashboard back is respected, and --force lifts the hold
+python3 "$REPO/scripts/deploy.py" rollback dashboard >/dev/null 2>&1
+held_at=$(readlink /sites/dashboard/current)
+python3 "$REPO/scripts/deploy.py" deploy $HK "$SRC/hk-good" >/dev/null 2>&1
+[ "$(readlink /sites/dashboard/current)" = "$held_at" ] && ok "a rolled-back dashboard stays rolled back" || bad "refresh undid the dashboard rollback"
+python3 "$REPO/scripts/dashboard.py" --force >/dev/null
+[ ! -e /sites/dashboard/.hold ] && [ "$(readlink /sites/dashboard/current)" != "$held_at" ] \
+  && ok "dashboard.py --force lifts the hold and refreshes" || bad "--force did not lift the hold"
+
+# the name is reserved, and test flags can never deploy test data
+out=$(python3 "$REPO/scripts/deploy.py" deploy dashboard "$SRC/hk-good" 2>&1); rc=$?
+[ $rc = 1 ] && grep -q reserved <<<"$out" && ok "deploying to 'dashboard' by hand is refused" || bad "reserved name accepted: $out"
+out=$(python3 "$REPO/scripts/dashboard.py" --log-file "$SRC/evil.log" 2>&1); rc=$?
+[ $rc = 1 ] && ok "--log-file without --out is refused (test data never goes live)" || bad "--log-file deployed: $out"
+
+# two refreshes at once: both finish, one after the other
+python3 "$REPO/scripts/dashboard.py" --force >/dev/null 2>&1 & r1=$!
+python3 "$REPO/scripts/dashboard.py" --force >/dev/null 2>&1 & r2=$!
+wait $r1; a=$?; wait $r2; b=$?
+[ $a = 0 ] && [ $b = 0 ] && ok "two refreshes at once both finish (they take turns)" || bad "concurrent refresh exit codes $a $b"
+echo "      (left behind for you to remove: /sites/$HK and $SRC)"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi

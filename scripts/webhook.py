@@ -110,6 +110,8 @@ def load_config(path, allow_file_urls=False):
                 raise ConfigError(f"{full_name}: {label} must be a string")
         if not deploy_mod.APP_RE.fullmatch(app):
             raise ConfigError(f"{full_name}: bad app name")
+        if app in deploy_mod.RESERVED_APPS:
+            raise ConfigError(f"{full_name}: app {app!r} is reserved ({deploy_mod.RESERVED_APPS[app]})")
         if app in apps:
             raise ConfigError(f"{full_name}: app {app!r} is already used by {apps[app]}")
         if not BRANCH_RE.fullmatch(branch) or ".." in branch or branch.startswith("-"):

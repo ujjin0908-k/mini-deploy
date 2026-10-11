@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Live releases of the mini-deploy platform">
+<!-- A backstop on top of textContent: only this site's own files may run or load.
+     (Inline styles are allowed; scripts are not.) Set here, not in Caddy, so it does
+     not restrict your other apps. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>mini-deploy dashboard</title>
 <link rel="stylesheet" href="style.css">
 <style>

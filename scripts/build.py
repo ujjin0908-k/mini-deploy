@@ -203,18 +203,20 @@ def main():
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # so `finally` runs on kill
     started = time.monotonic()
+    rc = 0
     try:
+        if args.app in deploy_mod.RESERVED_APPS:
+            raise BuildError(f"{args.app} is reserved: {deploy_mod.RESERVED_APPS[args.app]}")
         build_and_deploy(args.app, args.repo, args.install_scripts)
     except (BuildError, deploy_mod.DeployError) as e:
         deploy_mod.log_event(args.app, "build", None, "fail", started, str(e))
         print(f"error: {e}", file=sys.stderr)
-        return 1
-    deploy_mod.log_event(args.app, "build", None, "ok", started)
-    deploy_mod.clear_hold_after_manual_deploy(args.app)  # a build the owner starts lifts a hold
-    if args.app != "dashboard":
-        import dashboard  # lazy: keeps the dashboard in step; never raises
-        dashboard.maybe_refresh()
-    return 0
+        rc = 1
+    else:
+        deploy_mod.log_event(args.app, "build", None, "ok", started)
+        deploy_mod.clear_hold_after_manual_deploy(args.app)  # a build the owner starts lifts a hold
+    deploy_mod._refresh_dashboard(args.app)  # after failures too; never turns into an error
+    return rc
 
 
 if __name__ == "__main__":

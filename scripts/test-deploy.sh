@@ -45,7 +45,9 @@ mkdir -p "$SRC/tiny"; printf '<h1>tiny</h1>' > "$SRC/tiny/index.html"
 
 echo "== 1. deploy, roll back, roll forward, with requests in a loop =="
 id1=$(live_id $APP "$SRC/v1")
-( while true; do { host_get $APP /; echo; } >> "$LOG"; sleep 0.01; done ) &
+# Each answer is captured first and written with ONE printf, so stopping the loop can
+# never leave a half-written line behind (that once looked like a broken request).
+( while true; do r=$(host_get $APP /); printf '%s\n' "$r" >> "$LOG"; sleep 0.01; done ) &
 LOOP=$!
 
 sleep 0.3; id2=$(live_id $APP "$SRC/v2")

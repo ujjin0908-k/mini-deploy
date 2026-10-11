@@ -31,7 +31,9 @@ It runs after every deploy, build and webhook job, and does nothing if only the 
 
 - Read-only: no endpoint changes anything. You run the copied command yourself.
 - Log text is shown with `textContent` only, never as HTML.
-- Log lines that do not match the exact format are dropped; details are cut to 120 characters.
+- Log lines that do not match the exact format are dropped.
+- A failure shows only a short reason ("build failed", "timed out", "refused: unsafe file") and the commit id. The full error stays in `/var/log/mini-deploy.log` on the PC.
+- A Content-Security-Policy tells the browser to run only the page's own script.
 - No outside requests: no fonts, scripts or images from elsewhere.
 - Limit: Caddy is bound to your Wi-Fi address, so everyone on that network can see it.
 

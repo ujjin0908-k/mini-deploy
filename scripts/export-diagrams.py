@@ -62,7 +62,14 @@ def xml_safe(svg):
     return re.sub(r"&([A-Za-z][A-Za-z0-9]*);", fix, svg)
 
 
+UNSAFE_SVG = re.compile(r"<script|<foreignObject|<!DOCTYPE|<!ENTITY|\son[a-z]+\s*=|javascript:", re.I)
+
+
 def standalone(svg, style):
+    # These files land in the Obsidian vault. A drawing has no business running code.
+    bad = UNSAFE_SVG.search(svg)
+    if bad:
+        raise SystemExit(f"error: a drawing contains {bad.group(0)!r}; refusing to export it")
     view = re.search(r'viewBox="0 0 (\d+) (\d+)"', svg)
     width, height = view.group(1), view.group(2)
     svg = xml_safe(svg)
