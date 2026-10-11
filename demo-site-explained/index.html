@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="A visual guide to how the mini-deploy demo site is built and deployed">
+<title>The demo site, explained</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="explain.css">
+</head>
+<body>
+<main class="wrap stack">
+
+  <header class="glass guide-head">
+    <p class="eyebrow">mini-deploy &middot; visual guide</p>
+    <h1>The demo site, explained</h1>
+    <p class="lead muted">
+      A tiny site whose job is to prove the whole pipeline: its source is built inside a locked-down
+      Docker box, and only the finished folder goes live.
+    </p>
+    <ul class="toc">
+      <li><a class="pill" href="#journey">1 &middot; The journey</a></li>
+      <li><a class="pill" href="#stamp">2 &middot; Before and after</a></li>
+      <li><a class="pill" href="#releases">3 &middot; Releases</a></li>
+      <li><a class="pill" href="#files">4 &middot; The files</a></li>
+      <li><a class="pill" href="#box">5 &middot; The build box</a></li>
+    </ul>
+  </header>
+
+  <!-- 1 ------------------------------------------------------------------ -->
+  <section class="guide glass" id="journey">
+    <h2><span class="step-no">1</span> From source to a live page</h2>
+    <figure class="diagram">
+      <svg viewBox="0 0 760 300" role="img" aria-labelledby="t1 d1">
+        <title id="t1">The build and deploy journey</title>
+        <desc id="d1">The source folder is copied to a temporary folder, built in a Docker box with npm ci and npm run build, which produces dist. Deploy checks the dist folder, makes a new release folder, flips the current link, and Caddy serves it.</desc>
+        <defs>
+          <marker id="ah-j" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" class="arrow-head"/>
+          </marker>
+        </defs>
+
+        <!-- row 1 -->
+        <rect x="20" y="40" width="170" height="70" rx="14" class="box"/>
+        <text x="105" y="70" class="t mid">source folder</text>
+        <text x="105" y="90" class="t-mono mid">static-site/</text>
+
+        <rect x="225" y="40" width="160" height="70" rx="14" class="box"/>
+        <text x="305" y="64" class="t mid">temporary copy</text>
+        <text x="305" y="82" class="t-muted mid">on the WSL disk,</text>
+        <text x="305" y="98" class="t-muted mid">no .git, no .env</text>
+
+        <rect x="420" y="14" width="325" height="122" rx="18" class="box-soft"/>
+        <text x="436" y="34" class="t-muted">Docker box (node:22-slim)</text>
+        <rect x="434" y="48" width="140" height="70" rx="14" class="box-pink"/>
+        <text x="504" y="78" class="t mid">npm ci</text>
+        <text x="504" y="98" class="t-muted mid">no scripts</text>
+        <rect x="598" y="48" width="132" height="70" rx="14" class="box-pink"/>
+        <text x="664" y="78" class="t mid">npm run build</text>
+        <text x="664" y="98" class="t-muted mid">build.js</text>
+
+        <path d="M190 75 H225" class="line" marker-end="url(#ah-j)"/>
+        <path d="M385 75 H420" class="line" marker-end="url(#ah-j)"/>
+        <path d="M574 83 H598" class="line" marker-end="url(#ah-j)"/>
+
+        <!-- wrap-around arrow to row 2 -->
+        <path d="M664 136 V168 H105 V200" class="line" marker-end="url(#ah-j)"/>
+        <text x="380" y="160" class="t-muted mid">only dist/ comes out; the box is deleted</text>
+
+        <!-- row 2 -->
+        <rect x="20" y="200" width="170" height="76" rx="14" class="box"/>
+        <text x="105" y="230" class="t-mono mid">dist/</text>
+        <text x="105" y="250" class="t-muted mid">index.html, style.css</text>
+
+        <rect x="225" y="200" width="190" height="76" rx="14" class="box-pink"/>
+        <text x="320" y="228" class="t mid">deploy.py checks</text>
+        <text x="320" y="248" class="t-muted mid">no links, no .env,</text>
+        <text x="320" y="264" class="t-muted mid">under 500 MB</text>
+
+        <rect x="450" y="200" width="150" height="76" rx="14" class="box"/>
+        <text x="525" y="228" class="t mid">new release</text>
+        <text x="525" y="250" class="t-mono mid">releases/&lt;id&gt;</text>
+
+        <rect x="630" y="200" width="115" height="76" rx="14" class="box-dark"/>
+        <text x="687" y="228" class="t-light mid">current</text>
+        <text x="687" y="246" class="t-light mid">flips</text>
+        <text x="687" y="264" class="t-onDark mid">live</text>
+
+        <path d="M190 238 H225" class="line" marker-end="url(#ah-j)"/>
+        <path d="M415 238 H450" class="line" marker-end="url(#ah-j)"/>
+        <path d="M600 238 H630" class="line" marker-end="url(#ah-j)"/>
+      </svg>
+      <figcaption>Top row: the part that needs a build tool. Bottom row: the part every app shares. A failure anywhere in the top row stops before the bottom row, so the live site is never touched.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 2 ------------------------------------------------------------------ -->
+  <section class="guide glass" id="stamp">
+    <h2><span class="step-no">2</span> Before and after: the stamp</h2>
+    <p class="muted" style="margin-bottom: 1rem">
+      The source page has two placeholders. Only the build step can fill them in, so the finished
+      page is proof that it was built, and by which Node.
+    </p>
+    <div class="compare">
+      <div>
+        <h3><span class="tag">source</span> <code class="file">examples/static-site/src/index.html</code></h3>
+<pre class="code">&lt;h1&gt;static-site, built with <span class="k">__BUILT_WITH__</span>&lt;/h1&gt;
+&lt;p class="muted"&gt;built at <span class="k">__BUILT_AT__</span>&lt;/p&gt;</pre>
+      </div>
+      <div>
+        <h3><span class="tag">after the build</span> <code>dist/index.html</code></h3>
+<pre class="code">&lt;h1&gt;static-site, built with <span class="s">node v22.23.3</span>&lt;/h1&gt;
+&lt;p class="muted"&gt;built at <span class="s">2026-10-11T15:37:34.896Z</span>&lt;/p&gt;</pre>
+      </div>
+    </div>
+    <div class="callout" style="margin-top: 1rem">
+      <b>Why it matters.</b>
+      <span class="muted">The server has no Node installed. If you see a Node version on the live page, it came from the container. If you ever see <code>__BUILT_WITH__</code>, the source was deployed by mistake, and the test treats that as a failure.</span>
+    </div>
+  </section>
+
+  <!-- 3 ------------------------------------------------------------------ -->
+  <section class="guide glass" id="releases">
+    <h2><span class="step-no">3</span> Releases: keep a few, move one arrow</h2>
+    <figure class="diagram">
+      <svg viewBox="0 0 760 340" role="img" aria-labelledby="t2 d2">
+        <title id="t2">Five releases and the current arrow</title>
+        <desc id="d2">Five release folders in a row, oldest on the left. After a deploy the current arrow points at the newest. After a rollback the same five folders remain and the arrow points at the one before.</desc>
+        <defs>
+          <marker id="ah-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" class="arrow-head"/>
+          </marker>
+        </defs>
+
+        <text x="20" y="26" class="t">after a deploy</text>
+        <rect x="20"  y="40" width="130" height="50" rx="12" class="box"/><text x="85"  y="70" class="t-mono mid">&#8230;-004</text>
+        <rect x="170" y="40" width="130" height="50" rx="12" class="box"/><text x="235" y="70" class="t-mono mid">&#8230;-005</text>
+        <rect x="320" y="40" width="130" height="50" rx="12" class="box"/><text x="385" y="70" class="t-mono mid">&#8230;-006</text>
+        <rect x="470" y="40" width="130" height="50" rx="12" class="box"/><text x="535" y="70" class="t-mono mid">&#8230;-007</text>
+        <rect x="620" y="40" width="120" height="50" rx="12" class="box-pink"/><text x="680" y="70" class="t-mono mid">&#8230;-008</text>
+        <rect x="620" y="40" width="120" height="50" rx="12" fill="none" class="ring"/>
+        <path d="M680 128 V94" class="line" marker-end="url(#ah-r)"/>
+        <rect x="628" y="128" width="104" height="30" rx="15" class="box-dark"/>
+        <text x="680" y="147" class="t-light mid">current</text>
+
+        <text x="20" y="188" class="t">after a rollback (nothing is rebuilt or deleted)</text>
+        <rect x="20"  y="202" width="130" height="50" rx="12" class="box"/><text x="85"  y="232" class="t-mono mid">&#8230;-004</text>
+        <rect x="170" y="202" width="130" height="50" rx="12" class="box"/><text x="235" y="232" class="t-mono mid">&#8230;-005</text>
+        <rect x="320" y="202" width="130" height="50" rx="12" class="box"/><text x="385" y="232" class="t-mono mid">&#8230;-006</text>
+        <rect x="470" y="202" width="130" height="50" rx="12" class="box-pink"/><text x="535" y="232" class="t-mono mid">&#8230;-007</text>
+        <rect x="470" y="202" width="130" height="50" rx="12" fill="none" class="ring"/>
+        <rect x="620" y="202" width="120" height="50" rx="12" class="box-soft"/><text x="680" y="232" class="t-mono mid">&#8230;-008</text>
+        <path d="M535 292 V256" class="line" marker-end="url(#ah-r)"/>
+        <rect x="483" y="292" width="104" height="30" rx="15" class="box-dark"/>
+        <text x="535" y="311" class="t-light mid">current</text>
+        <text x="20" y="306" class="t-muted">The arrow moved one step left.</text>
+        <text x="20" y="324" class="t-muted">&#8230;-008 is still there to roll forward to.</text>
+      </svg>
+      <figcaption>A deploy adds a folder on the right and removes the oldest beyond five. A rollback only moves the arrow, which is why it takes a moment and why you can roll forward again.</figcaption>
+    </figure>
+    <div class="callout">
+      <b>What is the arrow, really?</b>
+      <span class="muted">A symbolic link called <code>current</code>. Caddy serves whatever it points at, and replacing it is a single filesystem step, so a visitor sees the old release or the new one and never half of each.</span>
+    </div>
+  </section>
+
+  <!-- 4 ------------------------------------------------------------------ -->
+  <section class="guide glass" id="files">
+    <h2><span class="step-no">4</span> The files</h2>
+    <table class="map">
+      <tr><th>File</th><th>Job</th></tr>
+      <tr><td><code class="file">examples/static-site/package.json</code></td><td>names the build command (<code>npm run build</code>) and the Node version wanted (<code>engines.node</code>)</td></tr>
+      <tr><td><code class="file">examples/static-site/package-lock.json</code></td><td>pins dependencies, so <code>npm ci</code> installs exactly the same every time</td></tr>
+      <tr><td><code class="file">examples/static-site/build.js</code></td><td>the build step: stamps <code>index.html</code>, copies the rest into <code>dist/</code></td></tr>
+      <tr><td><code class="file">examples/static-site/src/index.html</code></td><td>the page, with the two placeholders</td></tr>
+      <tr><td><code class="file">examples/static-site/src/style.css</code></td><td>a copy of the shared pink theme</td></tr>
+      <tr><td><code class="file">scripts/build.py</code></td><td>runs the Docker box and hands <code>dist/</code> to the deploy</td></tr>
+    </table>
+    <p class="muted" style="margin-top: 0.9rem">
+      The Node version comes from <code>engines.node</code>, but only as a small number put into a
+      fixed image name (<code>node:22-slim</code>). The raw text never reaches a command.
+    </p>
+  </section>
+
+  <!-- 5 ------------------------------------------------------------------ -->
+  <section class="guide stack" id="box">
+    <h2 style="padding-left: 0.2rem"><span class="step-no">5</span> What the build box is not allowed to do</h2>
+    <div class="grid">
+      <article class="glass stack"><h3>Be root</h3><p class="muted">It runs as user 1000. A build cannot change system files.</p></article>
+      <article class="glass stack"><h3>Write to its own disk</h3><p class="muted">The root filesystem is read-only. Only <code>/app</code> and a small temporary folder are writable.</p></article>
+      <article class="glass stack"><h3>Use special powers</h3><p class="muted">All Linux capabilities are dropped and no new privileges can be gained.</p></article>
+      <article class="glass stack"><h3>Run away</h3><p class="muted">1 GB of memory, 2 CPUs, 512 processes and 10 minutes. Then the box is removed.</p></article>
+      <article class="glass stack"><h3>See your secrets</h3><p class="muted"><code>.env</code> files are never copied in, and the host&rsquo;s environment is not passed.</p></article>
+      <article class="glass stack"><h3>Run install scripts</h3><p class="muted"><code>npm ci --ignore-scripts</code> is the default. A package&rsquo;s own install hooks do not run.</p></article>
+    </div>
+    <div class="callout">
+      <b>And if it does fail?</b>
+      <span class="muted">A failed build, an empty <code>dist/</code> or a <code>dist</code> that is a link all stop the deploy. The site keeps serving the previous release, and the last lines of the build output are written to the deploy log.</span>
+    </div>
+  </section>
+
+  <section class="try stack">
+    <h2>Try it</h2>
+    <p class="muted">Run from the repo folder, inside WSL. Docker must be running.</p>
+<pre class="code"><span class="c"># build in the box, then deploy</span>
+python3 scripts/build.py build demo-site examples/static-site
+<span class="c">image: node:22-slim@sha256:c3de60bf...</span>
+<span class="c">built dist/ with node v22.23.3</span>
+<span class="c">live: 20261011-232150-008  (was: 20261011-232150-007)</span>
+
+<span class="c"># see the releases (the * is live), and go back if you want</span>
+python3 scripts/deploy.py list demo-site
+python3 scripts/deploy.py rollback demo-site</pre>
+    <p class="muted">Then open <code>http://demo-site.localhost:8080</code> and look for the Node version in the heading.</p>
+  </section>
+
+  <footer class="muted back">
+    Part of the mini-deploy project. See also <code>dashboard-explained/</code> and <code>landing-explained/</code>.
+  </footer>
+</main>
+</body>
+</html>

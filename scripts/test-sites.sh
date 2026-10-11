@@ -90,11 +90,73 @@ pairs = [
     ("ink on glass pill", ink, over(0.78, petal)),
     ("light text on dark card", on_dark, ink), ("muted light text on dark card", on_dark_muted, ink),
     ("ok-green on dark card", rgb("#9EE3BE"), ink), ("pink on dark card", rgb("#FFB3C9"), ink),
+    ("white number on a deep badge", (255, 255, 255), deep),
     ("ok-green chip text is ink", ink, over(0.8, blush)),
 ]
 for name, fg, bg in pairs:
     r = ratio(fg, bg)
     check(r >= 4.5, f"contrast {name}: {r:.1f}:1")
+sys.exit(1 if bad else 0)
+PY
+
+echo
+echo "== 2b. the three *-explained folders are complete, accurate and accessible =="
+REPO=$REPO python3 - <<'PY' || fail=1
+import html, json, os, re, sys
+from pathlib import Path
+repo = Path(os.environ["REPO"])
+bad = 0
+def check(ok, msg):
+    global bad
+    print(("ok    " if ok else "FAIL  ") + msg)
+    bad += not ok
+
+pink = (repo / "web/theme/pink.css").read_bytes()
+explain = (repo / "web/theme/explain.css").read_bytes()
+real_top = {"generated_at", "apps", "events", "attention"}
+real_app = {"name", "live", "held", "deployed", "total", "releases"}
+real_event = {"ts", "app", "action", "release", "result", "duration", "detail"}
+
+for name in ("dashboard-explained", "demo-site-explained", "landing-explained"):
+    d = repo / name
+    files = {p.name for p in d.iterdir()} if d.is_dir() else set()
+    check({"index.html", "style.css", "explain.css", "README.md"} <= files, f"{name}: has index.html, style.css, explain.css, README.md")
+    if not d.is_dir():
+        continue
+    check(not any(f.startswith(".") for f in files), f"{name}: no dotfiles")
+    check((d / "style.css").read_bytes() == pink, f"{name}: style.css matches web/theme/pink.css")
+    check((d / "explain.css").read_bytes() == explain, f"{name}: explain.css matches web/theme/explain.css")
+
+    page = (d / "index.html").read_text(encoding="utf-8")
+    css = (d / "style.css").read_text(encoding="utf-8") + (d / "explain.css").read_text(encoding="utf-8")
+    outside = [m.group(0) for src in (page, css)
+               for m in re.finditer(r"https?://(?!([a-z0-9-]+\.)?localhost)[^\s\"'<)]+", src)]
+    check(not outside, f"{name}: nothing is fetched from elsewhere" + (f" ({outside})" if outside else ""))
+    check("<script" not in page, f"{name}: no scripts at all")
+    check(page.count("<h1") == 1, f"{name}: exactly one <h1>")
+
+    svgs = re.findall(r"<svg\b[^>]*>.*?</svg>", page, flags=re.S)
+    ok_svg = all('role="img"' in s and "aria-labelledby=" in s and "<title" in s and "<desc" in s for s in svgs)
+    check(len(svgs) >= 2 and ok_svg, f"{name}: {len(svgs)} diagrams, each with a title and a description")
+
+    ids = re.findall(r'\bid="([^"]+)"', page)
+    check(len(ids) == len(set(ids)), f"{name}: element ids are unique")
+    missing = [h for h in re.findall(r'href="#([^"]+)"', page) if h not in ids]
+    check(not missing, f"{name}: every in-page link has a target" + (f" ({missing})" if missing else ""))
+
+    files_named = re.findall(r'<code class="file">([^<]+)</code>', page)
+    gone = [f for f in files_named if not (repo / html.unescape(f)).exists()]
+    check(files_named and not gone, f"{name}: {len(files_named)} file names mentioned, all exist" + (f" (missing {gone})" if gone else ""))
+
+    for m in re.finditer(r'<pre class="code" data-json>(.*?)</pre>', page, flags=re.S):
+        try:
+            data = json.loads(html.unescape(re.sub(r"<[^>]+>", "", m.group(1))))
+            keys_ok = (set(data) <= real_top
+                       and all(set(a) <= real_app for a in data.get("apps", []))
+                       and all(set(e) <= real_event for e in data.get("events", [])))
+            check(keys_ok, f"{name}: the data.json example parses and uses only real field names")
+        except ValueError as e:
+            check(False, f"{name}: the data.json example is not valid JSON ({e})")
 sys.exit(1 if bad else 0)
 PY
 
