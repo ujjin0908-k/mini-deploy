@@ -1,0 +1,13 @@
+.env
+*.env
+__pycache__/
+*.pyc
+.venv/
+logs/
+*.log
+.claude/settings.local.json
+
+# graphify: commit only the readable report and graph; ignore caches and cost logs
+graphify-out/*
+!graphify-out/GRAPH_REPORT.md
+!graphify-out/graph.json
