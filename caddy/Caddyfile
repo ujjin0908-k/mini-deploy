@@ -2,12 +2,20 @@
 # Run with: caddy run --config /mnt/c/Users/indra/Code/mini-deploy/caddy/Caddyfile
 # Apply changes without a restart: caddy reload --config <same path>
 
+{
+    # The admin API can replace the whole config. By default it listens on TCP
+    # 127.0.0.1:2019 with no password, and in mirrored WSL networking any Windows
+    # process shares that loopback. A unix socket is only reachable as root in WSL.
+    admin unix//run/caddy-admin.sock
+}
+
 # Leading ":" = no hostname, so no HTTPS/certificate logic. Plain HTTP on 8080.
 :8080 {
     # Who can connect: this machine, and the home Wi-Fi address for phone tests.
     # The Wi-Fi IP comes from the router and can change. If Caddy fails to start
     # with "cannot assign requested address", update it (ipconfig on Windows).
     # NEVER use 0.0.0.0 here without a firewall rule that limits who may connect.
+    # Anyone on that Wi-Fi can read every deployed site: only deploy public content.
     bind 127.0.0.1 192.168.40.241
 
     # The Host header is outside input. Only a valid app name (same rule as
@@ -18,6 +26,11 @@
     @app header_regexp app Host ^([a-z0-9-]{1,40})\.(localhost|[0-9]{1,3}-[0-9]{1,3}-[0-9]{1,3}-[0-9]{1,3}\.nip\.io)(:[0-9]+)?$
 
     handle @app {
+        # Never serve dotfiles or dot-folders (.env, .git/, .npmrc), at any depth.
+        # (file_server's `hide` only matches the last path segment, so use a path match.)
+        @dotfile path_regexp (^|/)\.
+        respond @dotfile 404
+
         # Final layout: /sites/<app>/current (a symlink from stage 3).
         root * /sites/{re.app.1}/current
         file_server
