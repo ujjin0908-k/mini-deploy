@@ -16,7 +16,7 @@ Plan and diagrams: `Obsidian/Projects/claude add-ons/agent-patterns-and-deploy-p
 - Windows 11 + **WSL2 Ubuntu** (distro name `Ubuntu`). All server pieces run inside WSL. Use the `wsl-run` skill for every command.
 - Repo on the Windows side: `C:\Users\indra\Code\mini-deploy` (= `/mnt/c/Users/indra/Code/mini-deploy` in WSL). The owner uses GitHub Desktop; `git` isn't on the Windows PATH.
 - Runtime data lives in the WSL filesystem, **not** on `/mnt/c`: `/sites/<app>/releases/<id>/` + `/sites/<app>/current` symlink. NTFS symlinks and permissions behave differently.
-- Installed in WSL (2026-10-11): git, python3, tmux. Missing: docker, caddy.
+- Installed in WSL (2026-10-11): git, python3, tmux, caddy 2.11.7, docker 29.9.0 (Engine, from Docker's apt repo). The `caddy` systemd service is **disabled**: run Caddy ourselves in tmux on port 8080. `/sites` exists (empty).
 - Language for our own code: **Python 3, standard library first** (http.server, hmac, hashlib, subprocess, json). Shell only for tiny glue scripts.
 
 ## Owner's decisions (from the Obsidian note)
@@ -70,3 +70,10 @@ Obsidian root on Windows: `C:\Users\indra\OneDrive\Desktop\obsidian\skeloton\ai_
 
 - 2026-10-11: Repo created with the Claude kit only. No stage started. Commit "Initial commit" exists locally.
 - 2026-10-11: Graphify rules and code-map section added. Graph gets built after stage 1 (no code to map yet).
+- 2026-10-11: **Stage 0 done.** Caddy 2.11.7 and Docker Engine 29.9.0 installed in WSL; `caddy version` and `docker run hello-world` pass. Next: stage 1.
+- 2026-10-11: **Stage 1 done.** `caddy/Caddyfile` serves `/sites/hello/current` on `127.0.0.1:8080` (run in tmux session `caddy`). `curl localhost:8080` returns the page. Next: stage 2.
+- 2026-10-11: **Stage 2 done.** `caddy/Caddyfile` picks `/sites/<app>/current` from the Host header; the name must match `^[a-z0-9-]{1,40}$` or the answer is 404 "no such site". `app1.localhost:8080` and `app2.localhost:8080` show different pages. Plain `localhost:8080` is now 404. Next: stage 3.
+- 2026-10-11: **Stage 3 done.** `scripts/deploy.py` (deploy / rollback / list; Python stdlib, atomic flip, keeps 5 releases, refuses bad names, symlinks in the source and a real-folder `current`). `scripts/test-deploy.sh` passes: 100 requests across 4 flips, 0 broken. `hello`, `app1`, `app2` migrated onto releases. Next: stage 4.
+- 2026-10-11: **Stage 3B done: the phone loads `http://app1.192-168-40-241.nip.io:8080` over home Wi-Fi.** Owner added the firewall rules (Hyper-V rule + Private/LocalSubnet rule). Note: Windows cannot reach its own Wi-Fi address in mirrored mode; only the phone is a valid test. No HTTPS, so home-screen shortcut only. Details below.
+- (3B details, before it was confirmed) **mostly done, one owner step left.** `~/.wslconfig` = `networkingMode=mirrored` (undo: delete it, `wsl --shutdown`). Caddyfile binds `127.0.0.1 192.168.40.241` and accepts `<app>.<ip-with-dashes>.nip.io`. Caddy was restarted in tmux. Windows firewall is blocking inbound 8080, and the Wi-Fi profile is **Public**; the owner must add the firewall rule(s) from an admin PowerShell (the session is not admin and this is a security setting). Not exposed beyond the LAN. Docker: still works in mirrored mode? Recheck in stage 4.
+- 2026-10-11: **Graphify built (code only, 3 files, 37 nodes, 6 communities, 0 tokens).** `graphify-out/GRAPH_REPORT.md` and `graph.json` are committed. Markdown docs were left out on purpose. Refresh with `/graphify . --update` after code changes. Owner said "just push it", so stages 0-3B + graph were committed and pushed once.
