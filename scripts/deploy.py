@@ -423,6 +423,9 @@ def main():
     except DeployError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
+    if args.cmd != "list" and args.app != "dashboard":
+        import dashboard  # lazy: dashboard.py imports this module
+        dashboard.maybe_refresh()  # keeps the dashboard in step; never raises
     return 0
 
 

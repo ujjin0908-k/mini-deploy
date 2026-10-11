@@ -7,6 +7,7 @@
 # Pass = every request answered 200 with a complete page, bad input is refused with
 # a clear "error:" message, and nothing is left half-done.
 set -uo pipefail
+export MINI_DEPLOY_NO_DASHBOARD=1   # keep the real dashboard's releases quiet during tests
 
 REPO=/mnt/c/Users/indra/Code/mini-deploy
 DEPLOY="python3 $REPO/scripts/deploy.py"

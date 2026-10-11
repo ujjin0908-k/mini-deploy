@@ -211,6 +211,9 @@ def main():
         return 1
     deploy_mod.log_event(args.app, "build", None, "ok", started)
     deploy_mod.clear_hold_after_manual_deploy(args.app)  # a build the owner starts lifts a hold
+    if args.app != "dashboard":
+        import dashboard  # lazy: keeps the dashboard in step; never raises
+        dashboard.maybe_refresh()
     return 0
 
 

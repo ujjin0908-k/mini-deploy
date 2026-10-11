@@ -670,6 +670,11 @@ def worker(state, allow_file):
             deploy_mod.log_event(job["app"], "webhook", None, "crash", time.monotonic(),
                                  f"{job['repo']} {job['sha'][:7]} {type(e).__name__}: {e}")
             state.seen.remove(job["delivery"])
+        try:
+            import dashboard as dashboard_mod  # lazy: only the worker needs it
+            dashboard_mod.maybe_refresh()      # show the new state; never raises
+        except Exception:  # noqa: BLE001
+            pass
         sweep_hook_dirs()
 
 

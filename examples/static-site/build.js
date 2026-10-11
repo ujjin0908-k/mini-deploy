@@ -4,11 +4,21 @@
 const fs = require("fs");
 const path = require("path");
 
-const src = fs.readFileSync(path.join(__dirname, "src", "index.html"), "utf8");
-const out = src
-  .replace("__BUILT_WITH__", "node " + process.version)
-  .replace("__BUILT_AT__", new Date().toISOString());
+const srcDir = path.join(__dirname, "src");
+const outDir = path.join(__dirname, "dist");
+fs.mkdirSync(outDir, { recursive: true });
 
-fs.mkdirSync(path.join(__dirname, "dist"), { recursive: true });
-fs.writeFileSync(path.join(__dirname, "dist", "index.html"), out);
-console.log("built dist/index.html with node " + process.version);
+for (const name of fs.readdirSync(srcDir)) {
+  const from = path.join(srcDir, name);
+  if (!fs.statSync(from).isFile()) continue;
+  if (name === "index.html") {
+    // the only file that gets the stamps; everything else (style.css) is copied as it is
+    const html = fs.readFileSync(from, "utf8")
+      .replace("__BUILT_WITH__", "node " + process.version)
+      .replace("__BUILT_AT__", new Date().toISOString());
+    fs.writeFileSync(path.join(outDir, name), html);
+  } else {
+    fs.copyFileSync(from, path.join(outDir, name));
+  }
+}
+console.log("built dist/ with node " + process.version);

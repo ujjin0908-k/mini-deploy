@@ -6,6 +6,7 @@
 # Pass = host has no node, the built page is live, a broken or hostile build
 # changes nothing, and the build box is non-root, read-only and has no .env.
 set -uo pipefail
+export MINI_DEPLOY_NO_DASHBOARD=1   # keep the real dashboard's releases quiet during tests
 
 REPO=/mnt/c/Users/indra/Code/mini-deploy
 BUILD="python3 $REPO/scripts/build.py build"

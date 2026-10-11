@@ -8,6 +8,7 @@
 # touches your real secret, config or queue. Creates the app "hook-test" and a /tmp
 # folder; it never deletes anything itself (remove leftovers with direct rm -rf).
 set -uo pipefail
+export MINI_DEPLOY_NO_DASHBOARD=1   # keep the real dashboard's releases quiet during tests
 
 REPO=/mnt/c/Users/indra/Code/mini-deploy
 DEPLOY="python3 $REPO/scripts/deploy.py"
@@ -283,6 +284,7 @@ def raises(exc, fn):
     return False
 
 tmp = Path(tempfile.mkdtemp())
+d.LOG_FILE = tmp / "unit.log"   # the unit tests must never write fake apps into the real deploy log
 # --- the secret file is parsed, never sourced
 envf = tmp / "env"
 def write(text, mode=0o600):

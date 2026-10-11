@@ -31,6 +31,11 @@
         @dotfile path_regexp (^|/)\.
         respond @dotfile 404
 
+        # A deploy must show up at once. Without this, browsers guess how long a page
+        # stays fresh from its modification time and can keep serving the old release.
+        # "no-cache" means: ask again every time. The ETag makes that a cheap 304.
+        header Cache-Control "no-cache"
+
         # Final layout: /sites/<app>/current (a symlink from stage 3).
         root * /sites/{re.app.1}/current
         file_server

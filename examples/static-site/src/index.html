@@ -1,6 +1,31 @@
 <!doctype html>
+<html lang="en">
+<head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>static-site</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main class="wrap stack">
+  <section class="glass stack" style="padding: clamp(1.5rem, 6vw, 3rem)">
+    <p class="eyebrow">built by mini-deploy</p>
 <h1>static-site, built with __BUILT_WITH__</h1>
-<p>built at __BUILT_AT__</p>
+    <p class="muted">built at __BUILT_AT__</p>
+    <div class="row">
+      <span class="chip">live</span>
+      <span class="chip" data-state="held">a build step ran in a container</span>
+    </div>
+  </section>
+
+  <section class="dark-card stack">
+    <h2>How did this get here?</h2>
+    <p class="muted">
+      The source was copied into a clean Docker box, <code>npm ci</code> and
+      <code>npm run build</code> ran there, and only the finished <code>dist/</code> folder
+      became a release. The server itself has no Node installed.
+    </p>
+  </section>
+</main>
+</body>
+</html>
