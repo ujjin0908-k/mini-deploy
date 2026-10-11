@@ -7,6 +7,8 @@
 # state folder and a throw-away local git repo standing in for GitHub, so it never
 # touches your real secret, config or queue. Creates the app "hook-test" and a /tmp
 # folder; it never deletes anything itself (remove leftovers with direct rm -rf).
+# Section 14 makes previews of hook-test and takes them down again through the
+# product's own remove (that removal is what is being tested).
 set -uo pipefail
 export MINI_DEPLOY_NO_DASHBOARD=1   # keep the real dashboard's releases quiet during tests
 
@@ -61,8 +63,9 @@ commit_page() {  # marker -> prints the new commit sha
 break_build()   { echo 'process.exit(1)' > "$ORIGIN/build.js"; g add -A >/dev/null; g commit -q -m "break the build"; g rev-parse HEAD; }
 restore_build() { g checkout -q HEAD~1 -- build.js; g commit -q -m "fix the build"; }
 
+CONFIG=$SRC/webhook.json   # section 14 switches to a config with previews on
 start_server() {  # extra server flags...
-  WEBHOOK_SECRET=$SECRET python3 "$REPO/scripts/webhook.py" --config "$SRC/webhook.json" \
+  WEBHOOK_SECRET=$SECRET python3 "$REPO/scripts/webhook.py" --config "$CONFIG" \
     --state-dir "$STATE" --env-file "$SRC/no-such-env" --allow-file-urls "$@" >>"$SRC/server.out" 2>&1 &
   SPID=$!
   local i
@@ -124,6 +127,8 @@ expect "missing delivery id" 400 "$(curl -s -m 5 -w ' [%{http_code}]' -H "X-GitH
 sleep 3
 after_ignored=$(readlink "/sites/$APP/current" 2>/dev/null || echo none)
 [ "$before_ignored" = "$after_ignored" ] && ok "none of those deployed anything" || bad "something was deployed: $before_ignored -> $after_ignored"
+newlog | grep -q " $APP webhook - ignored .*is not a push to main" && ok "previews are off for this repo: the dev push was ignored" || bad "dev push not logged as ignored"
+ls -d /sites/*--$APP 2>/dev/null | grep -q '^/sites/dev--' && bad "a dev preview was made with previews off" || ok "no preview was made with previews off"
 
 echo
 echo "== 3. a signed push to main deploys by itself =="
@@ -349,6 +354,75 @@ s1.add(a); s1.add(b); s1.remove(b)
 s2 = w.Seen(sp)
 check(s2.has(a) and not s2.has(b), "delivery ids survive a restart; removed ones stay removed")
 
+# --- previews: site names made from branch names
+def fine(fn):
+    try:
+        fn(); return True
+    except Exception:
+        return False
+pn = d.preview_name
+branches = ["feature-x", "feature/x", "Feature-X", "x", "a" * 80, "fix-ab12", "dev", "feature/x-" + "b" * 60]
+names = {b: pn("demo-site", b) for b in branches}
+check(all(d.APP_RE.fullmatch(n) and d.preview_parent(n) == "demo-site" for n in names.values()),
+      f"every preview name is a valid site name with the right parent ({sorted(names.values())})")
+check(names["feature-x"] == "feature-x--demo-site", "a plain branch keeps its own name")
+check(len(set(names.values())) == len(names), "different branches never share a preview (feature/x vs feature-x, Feature-X)")
+check(pn("demo-site", "feature/x") == names["feature/x"], "the same branch always gets the same name")
+check(raises(d.DeployError, lambda: pn("a" * 35, "x")), "an app name too long for previews is refused")
+check(raises(d.DeployError, lambda: pn("x--y", "z")), "a preview of a preview is refused")
+check(d.preview_parent("demo-site") is None and d.preview_parent("--x") is None and d.preview_parent("a--b--c") is None,
+      "normal and malformed names are not previews")
+good_b = ["main", "feature/x", "release-1.2", "a_b", "Feature-X"]
+bad_b = ["../x", "a/../b", "-x", "a.lock", "a//b", ".hidden", "a/.b", "x/", "x.", "a b", "a;b", "$(id)", "", "a" * 101, None]
+check(all(w.safe_branch(b) for b in good_b), "ordinary branch names are accepted")
+rejected = [b for b in bad_b if not w.safe_branch(b)]
+check(rejected == bad_b, f"hostile branch names are refused (let through: {[b for b in bad_b if b not in rejected]})")
+
+# --- previews: at most MAX_PREVIEWS per app, removal only for previews
+d.SITES = tmp / "sites"; d.SITES.mkdir()
+for i in range(d.MAX_PREVIEWS):
+    (d.SITES / pn("demo-site", f"b{i:02d}x")).mkdir()
+check(raises(d.DeployError, lambda: d.check_preview_room(pn("demo-site", "one-more"))), f"preview number {d.MAX_PREVIEWS + 1} is refused")
+check(fine(lambda: d.check_preview_room(pn("demo-site", "b00x"))), "an existing preview can still be updated")
+check(fine(lambda: d.check_preview_room(pn("other-app", "b00x"))), "another app has its own count")
+pv = d.SITES / pn("demo-site", "b00x")
+(pv / "releases" / "20260101-000000").mkdir(parents=True)
+os.symlink("releases/20260101-000000", pv / "current")
+d.remove_preview(pv.name)
+check(not pv.exists() and not list(d.SITES.glob(".tmp-del-*")), "remove takes a preview away completely")
+(d.SITES / "demo-site").mkdir()
+check(raises(d.DeployError, lambda: d.remove_preview("demo-site")) and (d.SITES / "demo-site").is_dir(),
+      "remove refuses a normal app and leaves it alone")
+check(raises(d.DeployError, lambda: d.remove_preview("../etc--x")), "remove refuses a path")
+
+# --- previews: queue rules
+jobs = w.Jobs()
+mkp = lambda sha, action: {"app": "p", "sha": sha, "fallback": None, "action": action}
+jobs.submit(mkp("a" * 40, "build")); jobs.submit(mkp("0" * 40, "remove"))
+j = jobs.take(threading.Event())
+check(j["action"] == "remove" and j["fallback"] is None, "a removal replaces a waiting build and never falls back to it")
+jobs.submit(mkp("0" * 40, "remove")); jobs.submit(mkp("b" * 40, "build"))
+j = jobs.take(threading.Event())
+check(j["action"] == "build" and j["fallback"] is None, "a build never falls back to a removal")
+
+# --- previews: config and restored queue
+check(raises(w.ConfigError, cfg({"repos": {"a/b": {"app": "a" * 35, "previews": True}}})), "previews on an app name that is too long refused")
+check(raises(w.ConfigError, cfg({"repos": {"a/b": {"app": "demo-site", "previews": "yes"}}})), "previews must be true or false")
+check(raises(w.ConfigError, cfg({"repos": {"a/b": {"app": "x--demo"}}})), "an app name with '--' is refused (kept for previews)")
+cfgp = cfg({"repos": {"a/b": {"app": "demo-site", "previews": True}}})()
+sd = tmp / "st"; sd.mkdir()
+st = w.State(b"s" * 32, cfgp, sd)
+(sd / "pending.json").write_text(json.dumps([
+    {"repo": "a/b", "sha": "b" * 40, "branch": "feature/x", "action": "build"},
+    {"repo": "a/b", "sha": "0" * 40, "branch": "old", "action": "remove"},
+    {"repo": "a/b", "sha": "c" * 40, "branch": "../x", "action": "build"},
+    {"repo": "a/b", "sha": "c" * 40, "branch": "main", "action": "rm -rf"},
+]))
+restored = w.load_pending(st)
+apps = sorted(j["app"] for j in st.jobs.drain())
+check(restored == 2 and apps == sorted([pn("demo-site", "feature/x"), pn("demo-site", "old")]),
+      f"a restored queue keeps valid preview jobs and drops junk (got {restored}: {apps})")
+
 # --- the worker survives SystemExit and keeps working
 done = []
 def fake_run_job(job, allow_file, check_tip=True):
@@ -401,6 +475,79 @@ start_fail "listening on 0.0.0.0"              "listen must be"     "$SECRET"  "
 start_fail "bad app name in config"            "bad app name"       "$SECRET"  "$SRC/badapp.json"
 start_fail "two repos on one app"              "already used"       "$SECRET"  "$SRC/dupapp.json"
 start_fail "file:// URL without the test flag" "https://github.com" "$SECRET"  "$SRC/webhook.json"
+printf '{ "port": %s, "repos": {"a/b": {"app": "x--y"}} }' $((PORT+1)) > "$SRC/sepapp.json"
+printf '{ "port": %s, "repos": {"a/b": {"app": "ok-app", "previews": 1}} }' $((PORT+1)) > "$SRC/badprev.json"
+start_fail "app name with '--'"                "may not contain"    "$SECRET"  "$SRC/sepapp.json"
+start_fail "previews that are not true/false"  "true or false"      "$SECRET"  "$SRC/badprev.json"
+
+echo
+echo "== 14. preview deploys: a branch gets its own site, the live app is untouched =="
+cat > "$SRC/webhook-prev.json" <<JSON
+{ "listen": "127.0.0.1", "port": $PORT,
+  "repos": { "test/hook-repo": { "app": "$APP", "branch": "main", "subdir": "", "url": "file://$ORIGIN", "previews": true } } }
+JSON
+CONFIG=$SRC/webhook-prev.json
+start_server && ok "server up with previews on" || bad "server did not start"
+pname() { python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import deploy; print(deploy.preview_name(sys.argv[2], sys.argv[3]))' "$REPO/scripts" "$APP" "$1"; }
+ppage() { curl -s -m 3 --resolve "$1.localhost:8080:127.0.0.1" "http://$1.localhost:8080/"; }
+pcode() { curl -s -m 3 -o /dev/null -w '%{http_code}' --resolve "$1.localhost:8080:127.0.0.1" "http://$1.localhost:8080/"; }
+pwait() { local i; for i in $(seq 1 90); do ppage "$1" | grep -q -- "$2" && return 0; sleep 1; done; return 1; }
+bpush() { post push "$(guid)" "$(body test/hook-repo "refs/heads/$1" "$2")"; }
+delbody() { python3 -c 'import json,sys; print(json.dumps({"ref":sys.argv[1],"after":"0"*40,"deleted":True,"repository":{"full_name":"test/hook-repo"}}))' "$1"; }
+npreviews() { ls -d /sites/*--$APP 2>/dev/null | wc -l; }
+
+PB="feature/Prev-$RUN"                 # has a slash and capitals: the site name is cleaned up
+PNAME=$(pname "$PB")
+echo "      branch $PB -> site $PNAME"
+live_before=$(readlink "/sites/$APP/current")
+g checkout -q -b "$PB"
+SHA_P1=$(commit_page "$RUN-prev1")
+expect "signed push to a feature branch" 202 "$(bpush "$PB" "$SHA_P1")"
+if pwait "$PNAME" "marker-$RUN-prev1"; then ok "the preview at $PNAME.localhost shows the branch"; else bad "preview never showed marker-$RUN-prev1"; fi
+ppage "$PNAME" | grep -q 'built with node v' && ok "and it was built in the container" || bad "preview was not built"
+[ "$(readlink "/sites/$APP/current")" = "$live_before" ] && page | grep -q "marker-$RUN-s2" \
+  && ok "the live app did not change" || bad "a branch push changed the live app"
+newlog | grep -qE " $PNAME webhook [0-9]{8}-[0-9]{6}(-[0-9]+)? ok " && ok "the preview deploy is logged under its own name" || bad "no ok line for $PNAME"
+newlog | grep -q "Prev-$RUN" && bad "the raw branch name reached the log" || ok "the raw branch name never reaches the log"
+SHA_P2=$(commit_page "$RUN-prev2"); bpush "$PB" "$SHA_P2" >/dev/null
+pwait "$PNAME" "marker-$RUN-prev2" && ok "a second push updates the preview" || bad "preview did not update"
+SHA_P3=$(commit_page "$RUN-prev3"); bpush "$PB" "$SHA_P3" >/dev/null
+pwait "$PNAME" "marker-$RUN-prev3" && ok "a third push updates it again" || bad "preview did not update again"
+n=$(ls -A "/sites/$PNAME/releases" | grep -vc '^\.')
+[ "$n" = 2 ] && ok "a preview keeps only 2 releases" || bad "preview has $n releases (want 2)"
+
+$DEPLOY rollback "$PNAME" >/dev/null
+[ -f "/sites/$PNAME/.hold" ] && [ ! -f "/sites/$APP/.hold" ] && ok "a rollback holds the preview, not the live app" || bad "hold landed on the wrong app"
+$DEPLOY unhold "$PNAME" >/dev/null
+
+np=$(npreviews)
+for b in '../x' 'a/../b' '-x' 'a.lock' 'a//b' '.hidden' 'a/.b'; do
+  expect "branch '$b' is not built" 202 "$(bpush "$b" "$SHA_P3")"
+done
+sleep 2
+[ "$(npreviews)" = "$np" ] && ok "no preview was made for any of them" || bad "a hostile branch made a preview"
+newlog | grep -q "push to a branch name we do not build" && ok "they are logged as ignored" || bad "hostile branches not logged"
+
+expect "'branch deleted' while the branch still exists (replay)" 202 "$(post push "$(guid)" "$(delbody "refs/heads/$PB")")"
+if wait_log " $PNAME webhook - stale " 30; then ok "refused as stale"; else bad "replayed delete was not refused"; fi
+[ -d "/sites/$PNAME" ] && [ "$(pcode "$PNAME")" = 200 ] && ok "the preview is still up" || bad "a replayed delete took the preview down"
+
+g checkout -q main; g branch -q -D "$PB"
+expect "branch really deleted" 202 "$(post push "$(guid)" "$(delbody "refs/heads/$PB")")"
+if wait_log " $PNAME webhook - removed " 30; then ok "removal logged"; else bad "no removal line"; fi
+[ ! -e "/sites/$PNAME" ] && [ "$(pcode "$PNAME")" = 404 ] && ok "the preview is gone: its address answers 404" || bad "preview still there"
+page | grep -q "marker-$RUN-s2" && [ "$(readlink "/sites/$APP/current")" = "$live_before" ] && ok "the live app is still untouched" || bad "live app changed"
+stop_server
+
+mkdir -p "$SRC/pv"; echo "<h1>cli-preview-$RUN</h1>" > "$SRC/pv/index.html"
+CNAME=$(pname "cli-$RUN")
+$DEPLOY preview "$APP" "cli-$RUN" "$SRC/pv" | grep -q "address: http://$CNAME.localhost" && ok "deploy.py preview prints the address" || bad "deploy.py preview failed"
+ppage "$CNAME" | grep -q "cli-preview-$RUN" && ok "a hand-made preview is served" || bad "hand-made preview not served"
+$DEPLOY deploy "x--$APP" "$SRC/pv" >/dev/null 2>&1 && bad "deploy accepted a name with '--'" || ok "deploy refuses a name with '--' (previews only)"
+$DEPLOY remove "$APP" >/dev/null 2>&1 && bad "remove accepted a normal app" || ok "remove refuses a normal app"
+[ -L "/sites/$APP/current" ] && ok "and the normal app is still there" || bad "the normal app was touched"
+$DEPLOY remove "$CNAME" | grep -q removed && [ ! -e "/sites/$CNAME" ] && ok "deploy.py remove takes a preview down" || bad "remove failed"
+ls -d /sites/.tmp-del-* >/dev/null 2>&1 && bad "a removal left a .tmp-del folder" || ok "no removal leftovers in /sites"
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi

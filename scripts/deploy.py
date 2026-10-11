@@ -6,6 +6,12 @@
     deploy.py rollforward <app>              point `current` at the next newer release
     deploy.py unhold      <app>              let the webhook deploy this app again
     deploy.py list        <app>              show releases, `*` marks the live one
+    deploy.py preview     <app> <branch> <dir>   deploy <dir> as the preview of <branch>
+    deploy.py remove      <preview>          take a preview down (never a normal app)
+
+A preview is an app of its own named <branch>--<app> (feature-x--demo-site), so it gets
+releases, rollback and its own address with no change to Caddy. Only previews may
+contain "--"; that keeps the two kinds of name apart.
 
 A rollback or rollforward puts the app on hold (webhook pushes are skipped and logged
 as "held") so the next push cannot silently undo it. A manual `deploy` or `unhold` lifts it.
@@ -21,6 +27,7 @@ Standard library only. The same functions are reused by build.py and the webhook
 
 import argparse
 import fcntl
+import hashlib
 import os
 import re
 import shutil
@@ -43,6 +50,11 @@ KEEP = 5                           # releases kept for rollback (the rule says a
 MAX_RELEASE_BYTES = 500 * 1024 * 1024
 LOCK_WAIT = int(os.environ.get("MINI_DEPLOY_LOCK_WAIT", "600"))  # seconds
 
+PREVIEW_SEP = "--"                 # <branch>--<app>; normal app names may not contain it
+PREVIEW_KEEP = 2                   # a preview is short-lived: keep less history
+MAX_PREVIEWS = 10                  # per app, so a burst of branches cannot fill the disk
+MIN_SLUG_ROOM = 8                  # an app name must leave this much room for the branch part
+
 
 class DeployError(Exception):
     pass
@@ -55,6 +67,55 @@ def app_paths(app):
         raise DeployError(f"bad app name: use only a-z, 0-9 and '-', 1 to 40 characters")
     root = SITES / app
     return root, root / "releases", root / "current"
+
+
+# ---------------------------------------------------------------- previews
+
+def preview_parent(name):
+    """'feature-x--demo-site' -> 'demo-site'. None for a normal app name."""
+    if not APP_RE.fullmatch(name) or PREVIEW_SEP not in name:
+        return None
+    slug, _, parent = name.partition(PREVIEW_SEP)
+    if not slug or not parent or PREVIEW_SEP in parent or parent.startswith("-"):
+        return None
+    return parent
+
+
+def preview_name(app, branch):
+    """The site name for a branch: lowercase, only a-z 0-9 and '-', within 40 characters.
+
+    If the branch had to be changed to fit (Feature/X, a very long name), 4 characters
+    of a hash of the real name are added, so feature/x and feature-x never share one
+    preview. A name that already ends like such a hash gets one too, for the same reason.
+    """
+    if not APP_RE.fullmatch(app) or PREVIEW_SEP in app or app.startswith("-") or app.endswith("-"):
+        raise DeployError(f"{app!r} cannot have previews (needs a plain app name)")
+    room = 40 - len(app) - len(PREVIEW_SEP)
+    if room < MIN_SLUG_ROOM:
+        raise DeployError(f"app name {app!r} is too long for previews "
+                          f"(at most {40 - len(PREVIEW_SEP) - MIN_SLUG_ROOM} characters)")
+    if not isinstance(branch, str) or not branch:
+        raise DeployError("empty branch name")
+    slug = re.sub(r"[^a-z0-9]+", "-", branch.lower()).strip("-")
+    if slug == branch and 3 <= len(slug) <= room and not re.search(r"-[0-9a-f]{4}$", slug):
+        return f"{slug}{PREVIEW_SEP}{app}"
+    tag = hashlib.sha256(branch.encode("utf-8", "replace")).hexdigest()[:4]
+    slug = slug[:room - 5].strip("-")
+    return f"{slug}-{tag}{PREVIEW_SEP}{app}" if slug else f"{tag}{PREVIEW_SEP}{app}"
+
+
+def check_preview_room(name):
+    """Refuse a NEW preview once its app already has MAX_PREVIEWS. Updating one is fine."""
+    parent = preview_parent(name)
+    if parent is None:
+        raise DeployError(f"{name!r} is not a preview name")
+    if (SITES / name).exists():
+        return
+    count = sum(1 for p in SITES.glob(f"*{PREVIEW_SEP}{parent}")
+                if p.is_dir() and preview_parent(p.name) == parent)
+    if count >= MAX_PREVIEWS:
+        raise DeployError(f"preview limit reached: {parent} already has {MAX_PREVIEWS} previews "
+                          f"(take one down with: deploy.py remove <preview>)")
 
 
 def id_key(rid):
@@ -277,7 +338,8 @@ def _deploy_locked(src, root, releases, current):
     cleanup_stale(root, releases)
     live = current_id(current)  # raises early if `current` is a real folder
     releases.mkdir(parents=True, exist_ok=True)
-    prune(releases, live, keep=KEEP - 1)  # make room before copying, not after
+    keep = PREVIEW_KEEP if preview_parent(root.name) else KEEP
+    prune(releases, live, keep=keep - 1)  # make room before copying, not after
 
     release_id = next_release_id(release_ids(releases))
     # Fill a hidden folder first, rename it when complete. If anything fails here,
@@ -297,7 +359,7 @@ def _deploy_locked(src, root, releases, current):
 
     os.sync()  # file data reaches disk before `current` points at it
     flip(root, current, release_id)
-    prune(releases, release_id)
+    prune(releases, release_id, keep=keep)
     return release_id, live
 
 
@@ -405,6 +467,34 @@ def clear_hold_after_manual_deploy(app):
         print(f"{app}: hold cleared (manual deploy)")
 
 
+def remove_preview(name):
+    """Take a preview down: its address answers 404 at once, then its files are deleted.
+    Only names with '--' are accepted, so a typo can never remove a normal app."""
+    started = time.monotonic()
+    try:
+        if preview_parent(name) is None:
+            raise DeployError(f"{name!r} is not a preview; only previews (names with '--') can be removed")
+        root, _, current = app_paths(name)
+        if root.is_symlink() or not root.is_dir():
+            raise DeployError(f"no preview named {name!r}")
+        # Both locks: no deploy or build of this preview may be half-way through.
+        with locked(root), locked(root, ".build.lock"):
+            live = current_id(current)
+            gone = SITES / f".tmp-del-{name}-{os.getpid()}"
+            try:
+                os.rename(root, gone)  # one step: Caddy finds no folder from here on
+            except OSError as e:
+                raise DeployError(f"could not remove {name}: {e}")
+    except DeployError as e:
+        log_event(name if APP_RE.fullmatch(name) else "invalid-name", "remove", None, "fail", started, str(e))
+        raise
+    shutil.rmtree(gone, ignore_errors=True)
+    for old in SITES.glob(".tmp-del-*"):  # leftovers of a removal that was killed half-way
+        shutil.rmtree(old, ignore_errors=True)
+    log_event(name, "remove", None, "ok", started, f"was={live or '-'}")
+    print(f"removed: {name}")
+
+
 def list_releases(app):
     root, releases, current = app_paths(app)
     live = current_id(current)
@@ -433,6 +523,12 @@ def main():
     p.add_argument("app")
     p = sub.add_parser("list")
     p.add_argument("app")
+    p = sub.add_parser("preview")
+    p.add_argument("app")
+    p.add_argument("branch")
+    p.add_argument("dir")
+    p = sub.add_parser("remove")
+    p.add_argument("app", metavar="preview")
     args = parser.parse_args()
 
     rc = 0
@@ -440,8 +536,20 @@ def main():
         if args.cmd == "deploy":
             if args.app in RESERVED_APPS and not args.force:
                 raise DeployError(f"{args.app} is reserved: {RESERVED_APPS[args.app]} (use --force to override)")
+            if PREVIEW_SEP in args.app:
+                raise DeployError(f"names with '{PREVIEW_SEP}' are previews (use: deploy.py preview <app> <branch> <dir>)")
             deploy(args.app, args.dir)
             clear_hold_after_manual_deploy(args.app)
+        elif args.cmd == "preview":
+            if args.app in RESERVED_APPS:
+                raise DeployError(f"{args.app} is reserved: {RESERVED_APPS[args.app]}")
+            args.app = preview_name(args.app, args.branch)  # the dashboard refresh below uses it
+            check_preview_room(args.app)
+            deploy(args.app, args.dir)
+            clear_hold_after_manual_deploy(args.app)
+            print(f"address: http://{args.app}.localhost:8080/")
+        elif args.cmd == "remove":
+            remove_preview(args.app)
         elif args.cmd == "unhold":
             unhold(args.app)
         elif args.cmd == "rollback":

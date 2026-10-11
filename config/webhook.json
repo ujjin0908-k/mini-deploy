@@ -5,7 +5,8 @@
     "ujjin0908-k/mini-deploy": {
       "app": "demo-site",
       "branch": "main",
-      "subdir": "examples/static-site"
+      "subdir": "examples/static-site",
+      "previews": true
     }
   }
 }

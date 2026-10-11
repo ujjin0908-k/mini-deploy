@@ -222,6 +222,32 @@ sys.exit(1 if bad else 0)
 PY
 
 echo
+echo "== 3b. previews are listed right after their app, with their parent named =="
+REPO=$REPO SRC=$SRC python3 - <<'PY' || fail=1
+import os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["REPO"] + "/scripts")
+import dashboard
+bad = 0
+def check(ok, msg):
+    global bad
+    print(("ok    " if ok else "FAIL  ") + msg)
+    bad += not ok
+root = Path(os.environ["SRC"]) / "fake-sites"
+for name in ("zeta", "demo-site", "feat-x--demo-site", "abc--demo-site", "other"):
+    (root / name / "releases").mkdir(parents=True)
+apps = dashboard.collect_apps(root)
+order = [a["name"] for a in apps]
+check(order == ["demo-site", "abc--demo-site", "feat-x--demo-site", "other", "zeta"],
+      f"each app is followed by its previews (got {order})")
+parents = {a["name"]: a["preview_of"] for a in apps}
+check(parents["feat-x--demo-site"] == "demo-site" and parents["demo-site"] is None, "previews name their parent, apps do not")
+check(dashboard.public_detail("webhook", "removed", "test/repo 0000000 remove 1111") == "",
+      "a deleted branch shows no fake all-zero commit")
+sys.exit(1 if bad else 0)
+PY
+
+echo
 echo "== 4. deploy the three sites =="
 if python3 "$REPO/scripts/deploy.py" deploy mini-deploy "$REPO/web/landing" >/dev/null; then ok "landing deployed"; else bad "landing deploy failed"; fi
 if python3 "$REPO/scripts/build.py" build demo-site "$REPO/examples/static-site" >/dev/null 2>&1; then ok "demo-site built in Docker and deployed"; else bad "demo-site build failed"; fi

@@ -9,7 +9,11 @@
        worker: held? same sha? still the branch tip? -> git fetch <sha> -> build.py -> deploy.py
 
 Everything in a request is outside input. What decides the app, branch, clone URL and
-sub-folder is config/webhook.json, never the payload. A valid signature proves WHO sent
+sub-folder is config/webhook.json, never the payload. One exception, only for a repo with
+"previews": true: a push to ANOTHER branch builds that branch as a preview site
+(<branch>--<app>), and deleting the branch takes the preview down. That branch name does
+come from the payload, so it is read only after the signature check, must pass
+safe_branch(), and only ever reaches git as one list argument. A valid signature proves WHO sent
 a request, not that it is still current, so the worker also checks that the pushed commit
 is still the tip of the branch before building it. The server only listens on loopback;
 putting it on the internet (a tunnel) is a separate decision for the owner.
@@ -76,6 +80,15 @@ class GitError(Exception):
 
 # ---------------------------------------------------------------- config and secret
 
+def safe_branch(branch):
+    """A branch name we are willing to hand to git: a strict subset of what git allows.
+    No '..', no leading '-' (could read as an option), no '//', no '.lock' ending."""
+    return (isinstance(branch, str) and BRANCH_RE.fullmatch(branch) is not None
+            and ".." not in branch and "//" not in branch
+            and not branch.startswith(("-", "/", ".")) and not branch.endswith(("/", ".", ".lock"))
+            and "/." not in branch)
+
+
 def load_config(path, allow_file_urls=False):
     """Allowlist of repos. Validated once at start, so request handling can trust it."""
     try:
@@ -114,8 +127,18 @@ def load_config(path, allow_file_urls=False):
             raise ConfigError(f"{full_name}: app {app!r} is reserved ({deploy_mod.RESERVED_APPS[app]})")
         if app in apps:
             raise ConfigError(f"{full_name}: app {app!r} is already used by {apps[app]}")
-        if not BRANCH_RE.fullmatch(branch) or ".." in branch or branch.startswith("-"):
+        if not safe_branch(branch):
             raise ConfigError(f"{full_name}: bad branch")
+        previews = entry.get("previews", False)
+        if not isinstance(previews, bool):
+            raise ConfigError(f"{full_name}: previews must be true or false")
+        if deploy_mod.PREVIEW_SEP in app:
+            raise ConfigError(f"{full_name}: app names may not contain '{deploy_mod.PREVIEW_SEP}' (kept for previews)")
+        if previews:
+            try:
+                deploy_mod.preview_name(app, "probe")  # app name leaves room for a branch part
+            except deploy_mod.DeployError as e:
+                raise ConfigError(f"{full_name}: {e}")
         if not SUBDIR_RE.fullmatch(subdir) or ".." in subdir.split("/") or subdir.startswith("/"):
             raise ConfigError(f"{full_name}: bad subdir")
         if url.startswith("https://github.com/"):
@@ -124,7 +147,7 @@ def load_config(path, allow_file_urls=False):
             pass  # only for the test script
         else:
             raise ConfigError(f"{full_name}: url must be https://github.com/...")
-        repos[full_name] = {"app": app, "branch": branch, "subdir": subdir, "url": url}
+        repos[full_name] = {"app": app, "branch": branch, "subdir": subdir, "url": url, "previews": previews}
         apps[app] = full_name
     return {"listen": listen, "port": port, "repos": repos}
 
@@ -230,7 +253,11 @@ class Jobs:
     def submit(self, job):
         with self.cond:
             replaced = self.pending.get(job["app"])
-            if replaced is not None:
+            # Only a build falls back to the build it replaced. A removal never falls back
+            # (the branch is gone), and a build never falls back to a removal.
+            both_builds = replaced is not None and job.get("action", "build") == "build" \
+                and replaced.get("action", "build") == "build"
+            if both_builds:
                 job["fallback"] = replaced
                 depth, node = 0, job
                 while node.get("fallback") is not None:  # keep the chain short
@@ -288,9 +315,13 @@ class State:
         self.log("rejected", detail + extra)
 
 
-def make_job(cfg, repo, sha, delivery):
-    return {"app": cfg["app"], "repo": repo, "sha": sha, "url": cfg["url"], "branch": cfg["branch"],
-            "subdir": cfg["subdir"], "delivery": delivery, "fallback": None, "retried": False}
+def make_job(cfg, repo, sha, delivery, branch=None, action="build"):
+    """branch=None: the live app. Otherwise a preview of that (already checked) branch.
+    action "remove" takes the preview down (the branch was deleted)."""
+    app = cfg["app"] if branch is None else deploy_mod.preview_name(cfg["app"], branch)
+    return {"app": app, "repo": repo, "sha": sha, "url": cfg["url"], "branch": branch or cfg["branch"],
+            "subdir": cfg["subdir"], "delivery": delivery, "fallback": None, "retried": False,
+            "action": action}
 
 
 def save_pending(state):
@@ -324,7 +355,15 @@ def load_pending(state):
         if cfg is None or not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
             return None
         delivery = raw.get("delivery") if isinstance(raw.get("delivery"), str) else NO_DELIVERY
-        job = make_job(cfg, repo, sha, delivery if DELIVERY_RE.fullmatch(delivery) else NO_DELIVERY)
+        delivery = delivery if DELIVERY_RE.fullmatch(delivery) else NO_DELIVERY
+        branch, action = raw.get("branch"), raw.get("action", "build")
+        if action not in ("build", "remove"):
+            return None
+        if branch == cfg["branch"] and action == "build":
+            branch = None                                   # the live app
+        elif not (cfg["previews"] and safe_branch(branch) and branch != cfg["branch"]):
+            return None                                     # previews were switched off, or junk
+        job = make_job(cfg, repo, sha, delivery, branch, action)
         job["fallback"] = revive(raw.get("fallback"))
         return job
 
@@ -427,17 +466,29 @@ class Handler(BaseHTTPRequestHandler):
             state.seen.add(delivery)
             state.log("ignored", f"{repo} is not in the allowlist {delivery}")
             return self._reply(202, "ignored")
-        if deleted or after == "0" * 40 or ref != f"refs/heads/{cfg['branch']}":
+        gone = deleted or after == "0" * 40
+        branch = ref[len("refs/heads/"):] if isinstance(ref, str) and ref.startswith("refs/heads/") else None
+        if branch == cfg["branch"] and not gone:
+            job = make_job(cfg, repo, after, delivery)                      # the live app
+        elif cfg["previews"] and branch is not None and branch != cfg["branch"]:
+            # 6. A preview. The branch is outside input: strict check, and it never
+            # appears in the log (only the site name made from it, which is safe).
+            if not safe_branch(branch):
+                state.seen.add(delivery)
+                state.log("ignored", f"{repo} push to a branch name we do not build {delivery}", cfg["app"])
+                return self._reply(202, "ignored")
+            job = make_job(cfg, repo, after, delivery, branch, "remove" if gone else "build")
+        else:
             state.seen.add(delivery)
-            state.log("ignored", f"{repo} {ref} is not a push to {cfg['branch']}", cfg["app"])
+            state.log("ignored", f"{repo} is not a push to {cfg['branch']} {delivery}", cfg["app"])
             return self._reply(202, "ignored")
 
         if not state.seen.add(delivery):  # lost a race with an identical delivery
             return self._reply(202, "duplicate")
-        replaced = state.jobs.submit(make_job(cfg, repo, after, delivery))
+        replaced = state.jobs.submit(job)
         if replaced:
-            state.log("superseded", f"{replaced['sha'][:7]} replaced by {after[:7]}", cfg["app"])
-        state.log("queued", f"{repo} {after[:7]} {delivery}", cfg["app"])
+            state.log("superseded", f"{replaced['sha'][:7]} replaced by {after[:7]}", job["app"])
+        state.log("queued", f"{repo} {after[:7]} {job['action']} {delivery}", job["app"])
         return self._reply(202, "queued")
 
 
@@ -583,8 +634,22 @@ def write_deployed(app_root, sha, release):
 
 
 def run_job(job, allow_file, check_tip=True):
-    """Returns (status, release): ok, held, same or stale. Raises on a real failure."""
+    """Returns (status, release): ok, removed, held, same, gone or stale. Raises on a real failure."""
     app_root = deploy_mod.SITES / job["app"]
+    if job.get("action") == "remove":
+        # Same freshness rule as a build: a replayed "branch deleted" must not take down
+        # the preview of a branch that exists again. Only remove if the branch is gone.
+        out = with_retry(lambda: git(["ls-remote", "--", job["url"], f"refs/heads/{job['branch']}"],
+                                     allow_file=allow_file))
+        if out.strip():
+            return "stale", None
+        if not app_root.is_dir():
+            return "gone", None                           # nothing to take down
+        deploy_mod.remove_preview(job["app"])
+        return "removed", None
+
+    if deploy_mod.preview_parent(job["app"]):
+        deploy_mod.check_preview_room(job["app"])         # at most MAX_PREVIEWS per app
     if deploy_mod.is_held(app_root):                      # a rollback is in force
         return "held", None
     deployed = read_deployed(app_root)
@@ -650,8 +715,8 @@ def process(state, job, allow_file):
                 deploy_mod.log_event(j["app"], "webhook", None, "requeued", started, tag)
                 return
             continue
-        if status == "ok":
-            deploy_mod.log_event(j["app"], "webhook", release, "ok", started, tag)
+        if status in ("ok", "removed"):
+            deploy_mod.log_event(j["app"], "webhook", release, status, started, tag)
         else:
             # held / same / stale: nothing was built, so let GitHub's "Redeliver" work
             # once the owner has unheld the app. A stale one is refused again anyway.

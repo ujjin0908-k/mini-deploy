@@ -84,7 +84,7 @@ def public_detail(action, result, detail):
         parts.append("bad signature" if "signature" in detail else "request refused")
     # webhook lines start "owner/repo <sha7> ..."; show only the commit id
     m = re.match(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+ ([0-9a-f]{7})\b", detail)
-    if m:
+    if m and m.group(1) != "0000000":  # all zeros = a deleted branch, there is no commit
         parts.append(f"commit {m.group(1)}")
     m = re.search(r"\bwas=(\d{8}-\d{6}(?:-\d{1,3})?)\b", detail)
     if m:
@@ -120,12 +120,15 @@ def collect_apps(sites_root):
             pass
         apps.append({
             "name": path.name,
+            "preview_of": deploy_mod.preview_parent(path.name),  # None for a normal app
             "live": live,
             "held": deploy_mod.is_held(path),
             "deployed": deployed,
             "total": len(ids),
             "releases": [{"id": r, "live": r == live} for r in shown],
         })
+    # Each app, then its previews right after it.
+    apps.sort(key=lambda a: (a["preview_of"] or a["name"], a["preview_of"] is not None, a["name"]))
     return apps
 
 

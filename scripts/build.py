@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """mini-deploy stage 4: build a repo inside a Docker container, then deploy dist/.
 
-    build.py build <app> <repo-dir> [--install-scripts]
+    build.py build <app> <repo-dir> [--install-scripts] [--preview <branch>]
 
     repo-dir --copy--> temp work folder --mounted--> [ node container, non-root ]
                                                       npm ci && npm run build
@@ -199,6 +199,8 @@ def main():
     p.add_argument("repo")
     p.add_argument("--install-scripts", action="store_true",
                    help="allow npm lifecycle scripts during npm ci (off by default)")
+    p.add_argument("--preview", metavar="BRANCH",
+                   help="build as the preview of BRANCH (<branch>--<app>), not the live app")
     args = parser.parse_args()
 
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))  # so `finally` runs on kill
@@ -207,6 +209,11 @@ def main():
     try:
         if args.app in deploy_mod.RESERVED_APPS:
             raise BuildError(f"{args.app} is reserved: {deploy_mod.RESERVED_APPS[args.app]}")
+        if deploy_mod.PREVIEW_SEP in args.app:
+            raise BuildError(f"names with '{deploy_mod.PREVIEW_SEP}' are previews (use --preview <branch>)")
+        if args.preview is not None:
+            args.app = deploy_mod.preview_name(args.app, args.preview)
+            deploy_mod.check_preview_room(args.app)
         build_and_deploy(args.app, args.repo, args.install_scripts)
     except (BuildError, deploy_mod.DeployError) as e:
         deploy_mod.log_event(args.app, "build", None, "fail", started, str(e))

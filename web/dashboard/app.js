@@ -75,6 +75,16 @@
     head.appendChild(chip);
     card.appendChild(head);
 
+    if (app.preview_of && NAME_RE.test(app.name) && NAME_RE.test(app.preview_of)) {
+      // A preview lives at its own address: same host as this page, other first label.
+      var line = el("p", "muted", "preview of " + app.preview_of + " · ");
+      var host = location.host;
+      var link = el("a", null, "open preview");
+      link.href = location.protocol + "//" + app.name + host.slice(host.indexOf("."));
+      line.appendChild(link);
+      card.appendChild(line);
+    }
+
     card.appendChild(el("p", "muted mono", app.live ? "release " + app.live : "nothing live"));
     if (app.deployed) {
       card.appendChild(el("p", "muted", "commit " + app.deployed));
@@ -96,6 +106,9 @@
       card.appendChild(command("python3 scripts/deploy.py rollback " + app.name));
       if (app.held) {
         card.appendChild(command("python3 scripts/deploy.py unhold " + app.name));
+      }
+      if (app.preview_of) {
+        card.appendChild(command("python3 scripts/deploy.py remove " + app.name));
       }
     }
     return card;
@@ -126,7 +139,8 @@
       var row = el("div", "log-row");
       var top = el("div", "row between");
       top.appendChild(el("span", "mono", ev.app + " · " + ev.action));
-      var good = ev.result === "ok" || ev.result === "queued" || ev.result === "same";
+      var good = ev.result === "ok" || ev.result === "queued" || ev.result === "same" ||
+        ev.result === "removed";
       top.appendChild(el("span", good ? "result-ok" : "result-bad", ev.result));
       row.appendChild(top);
       var meta = when(ev.ts) + " · " + ev.duration;
