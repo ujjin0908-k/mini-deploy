@@ -160,6 +160,13 @@ for name in ("dashboard-explained", "demo-site-explained", "landing-explained"):
 sys.exit(1 if bad else 0)
 PY
 
+if exp=$(python3 "$REPO/scripts/export-diagrams.py" --out "$SRC/svg" 2>&1) \
+   && [ "$(ls "$SRC/svg"/*.svg 2>/dev/null | wc -l)" = 9 ]; then
+  ok "all 9 drawings export as standalone, well-formed .svg files (the Obsidian pictures)"
+else
+  bad "diagram export failed: $exp"
+fi
+
 echo
 echo "== 3. log lines cannot inject anything, and bad lines are dropped =="
 cat > "$SRC/evil.log" <<'LOG'
