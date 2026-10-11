@@ -4,7 +4,11 @@
     deploy.py deploy      <app> <dir>        copy <dir> into a new release and go live
     deploy.py rollback    <app> [release-id] point `current` at an older release
     deploy.py rollforward <app>              point `current` at the next newer release
+    deploy.py unhold      <app>              let the webhook deploy this app again
     deploy.py list        <app>              show releases, `*` marks the live one
+
+A rollback or rollforward puts the app on hold (webhook pushes are skipped and logged
+as "held") so the next push cannot silently undo it. A manual `deploy` or `unhold` lifts it.
 
 Layout (runtime data lives in the WSL filesystem, not on /mnt/c):
 
@@ -96,6 +100,29 @@ def current_id(current):
     return None
 
 
+# ---------------------------------------------------------------- hold (after a rollback)
+
+HOLD_NAME = ".hold"
+
+
+def is_held(root):
+    """A rollback means "something was wrong". While `.hold` exists the webhook skips
+    this app, so the next push cannot silently undo the rollback."""
+    return (root / HOLD_NAME).exists()
+
+
+def set_hold(root):
+    (root / HOLD_NAME).write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ\n", time.gmtime()), encoding="ascii")
+
+
+def clear_hold(root):
+    try:
+        (root / HOLD_NAME).unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
 # ---------------------------------------------------------------- logging
 
 def log_event(app, action, release, result, started, detail=""):
@@ -134,7 +161,9 @@ class locked:
             except BlockingIOError:
                 if time.monotonic() >= deadline:
                     fh.close()
-                    raise DeployError(f"another deploy of this app is still running (waited {LOCK_WAIT}s)")
+                    err = DeployError(f"another deploy of this app is still running (waited {LOCK_WAIT}s)")
+                    err.busy = True  # lets the webhook worker retry this one once
+                    raise err
                 time.sleep(0.2)
         self.fh = fh
 
@@ -310,8 +339,11 @@ def rollback(app, release_id=None):
             elif not ID_RE.fullmatch(target) or target not in ids:
                 raise DeployError(f"unknown release {target!r} (try: list {app})")
             flip(root, current, target)
+            set_hold(root)
             return target, live
-    return _logged(app, "rollback", run)
+    result = _logged(app, "rollback", run)
+    print(f"held: webhook deploys for {app} are paused. Resume with: deploy.py unhold {app}")
+    return result
 
 
 def rollforward(app):
@@ -325,8 +357,26 @@ def rollforward(app):
             if not newer:
                 raise DeployError("already on the newest release")
             flip(root, current, newer[0])
+            set_hold(root)
             return newer[0], live
-    return _logged(app, "rollforward", run)
+    result = _logged(app, "rollforward", run)
+    print(f"held: webhook deploys for {app} are paused. Resume with: deploy.py unhold {app}")
+    return result
+
+
+def unhold(app):
+    started = time.monotonic()
+    root, _, _ = app_paths(app)
+    cleared = clear_hold(root)
+    log_event(app, "unhold", None, "ok" if cleared else "noop", started)
+    print(f"{app}: webhook deploys resumed" if cleared else f"{app}: was not held")
+
+
+def clear_hold_after_manual_deploy(app):
+    """A deploy the owner starts by hand is a clear decision: lift the hold."""
+    root, _, _ = app_paths(app)
+    if clear_hold(root):
+        print(f"{app}: hold cleared (manual deploy)")
 
 
 def list_releases(app):
@@ -337,6 +387,8 @@ def list_releases(app):
         print(f"{app}: no releases")
     for rid in ids:
         print(f"{'*' if rid == live else ' '} {rid}")
+    if is_held(root):
+        print(f"(held: webhook deploys paused; resume with: deploy.py unhold {app})")
 
 
 def main():
@@ -350,6 +402,8 @@ def main():
     p.add_argument("release", nargs="?")
     p = sub.add_parser("rollforward")
     p.add_argument("app")
+    p = sub.add_parser("unhold")
+    p.add_argument("app")
     p = sub.add_parser("list")
     p.add_argument("app")
     args = parser.parse_args()
@@ -357,6 +411,9 @@ def main():
     try:
         if args.cmd == "deploy":
             deploy(args.app, args.dir)
+            clear_hold_after_manual_deploy(args.app)
+        elif args.cmd == "unhold":
+            unhold(args.app)
         elif args.cmd == "rollback":
             rollback(args.app, args.release)
         elif args.cmd == "rollforward":

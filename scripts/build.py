@@ -13,6 +13,7 @@ an older commit that builds slowly cannot overwrite a newer one. Standard librar
 """
 
 import argparse
+import collections
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -121,17 +123,35 @@ def docker_build(work, image, install_scripts):
         image,
         "sh", "-c", f"{npm} && npm run build",
     ]
+    # List of arguments, no shell=True on the host. `sh -c` runs inside the box.
+    # Output is echoed live and the last lines are kept, so a failure in the deploy
+    # log says WHY (the reason used to exist only in the terminal).
+    tail = collections.deque(maxlen=40)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, errors="replace")
+
+    def pump():
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            if line.strip():
+                tail.append(line.strip())
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
     try:
-        # List of arguments, no shell=True on the host. `sh -c` runs inside the box.
-        result = subprocess.run(cmd, timeout=TIMEOUT)
-    except subprocess.TimeoutExpired:
-        raise BuildError(f"build timed out after {TIMEOUT}s")
+        try:
+            rc = proc.wait(timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            raise BuildError(f"build timed out after {TIMEOUT}s")
     finally:
         # Killing the docker client does not stop the container, and a SIGTERM or
         # Ctrl-C lands here too, so always remove it by name.
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
-    if result.returncode != 0:
-        raise BuildError(f"build failed (exit {result.returncode}); nothing was deployed")
+        reader.join(timeout=5)
+    if rc != 0:
+        why = " | ".join(list(tail)[-4:])
+        raise BuildError(f"build failed (exit {rc}); nothing was deployed: {why}")
 
 
 def build_and_deploy(app, repo, install_scripts=False):
@@ -166,7 +186,7 @@ def build_and_deploy(app, repo, install_scripts=False):
                 raise BuildError("build finished but dist/ is missing or empty; nothing was deployed")
             if not dist.resolve().is_relative_to(app_dir.resolve()):
                 raise BuildError("dist resolves outside the work folder; nothing was deployed")
-            deploy_mod.deploy(app, dist)
+            return deploy_mod.deploy(app, dist)  # the new release id
         finally:
             shutil.rmtree(work, ignore_errors=True)  # the temp copy always goes away
 
@@ -190,6 +210,7 @@ def main():
         print(f"error: {e}", file=sys.stderr)
         return 1
     deploy_mod.log_event(args.app, "build", None, "ok", started)
+    deploy_mod.clear_hold_after_manual_deploy(args.app)  # a build the owner starts lifts a hold
     return 0
 
 
