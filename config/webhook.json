@@ -1,0 +1,11 @@
+{
+  "listen": "127.0.0.1",
+  "port": 9000,
+  "repos": {
+    "ujjin0908-k/mini-deploy": {
+      "app": "demo-site",
+      "branch": "main",
+      "subdir": "examples/static-site"
+    }
+  }
+}
