@@ -159,42 +159,65 @@
     <figure class="diagram">
       <svg viewBox="0 0 760 250" role="img" aria-labelledby="t3 d3">
         <title id="t3">The glass card recipe</title>
-        <desc id="d3">A pink gradient background plus a soft sphere plus white at 58 percent opacity with a blur, plus a thin white border and a soft pink shadow, equals the frosted glass card.</desc>
+        <desc id="d3">A warm paper base plus soft clouds of colour plus fine grain, with white at 46 percent opacity and a blur on top, a thin white border and a soft shadow, equals the frosted glass card.</desc>
         <defs>
-          <linearGradient id="g-sky" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#F9D7E2"/><stop offset="1" stop-color="#FFF8F5"/>
-          </linearGradient>
-          <radialGradient id="g-orb" cx="0.3" cy="0.28" r="0.8">
-            <stop offset="0" stop-color="#ffffff"/>
-            <stop offset="0.5" stop-color="#E98FA9" stop-opacity="0.6"/>
-            <stop offset="1" stop-color="#C45A7E" stop-opacity="0.55"/>
-          </radialGradient>
+          <radialGradient id="g-butter"><stop offset="0" stop-color="#F1E58F"/><stop offset="1" stop-color="#F1E58F" stop-opacity="0"/></radialGradient>
+          <radialGradient id="g-pink"><stop offset="0" stop-color="#F4AEC2"/><stop offset="1" stop-color="#F4AEC2" stop-opacity="0"/></radialGradient>
+          <radialGradient id="g-sage"><stop offset="0" stop-color="#B2C79C"/><stop offset="1" stop-color="#B2C79C" stop-opacity="0"/></radialGradient>
+          <clipPath id="c-2"><rect x="215" y="30" width="150" height="130" rx="20"/></clipPath>
+          <clipPath id="c-3"><rect x="410" y="30" width="150" height="130" rx="20"/></clipPath>
+          <clipPath id="c-4"><rect x="605" y="30" width="140" height="130" rx="20"/></clipPath>
+          <filter id="f-grain" x="0" y="0" width="100%" height="100%">
+            <feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" stitchTiles="stitch"/>
+            <feColorMatrix values="0 0 0 0 0.42  0 0 0 0 0.36  0 0 0 0 0.38  0 0 0 0.45 0"/>
+          </filter>
         </defs>
-        <rect x="20" y="30" width="150" height="130" rx="20" fill="url(#g-sky)" stroke="#E98FA9"/>
-        <text x="95" y="188" class="t mid">1 sky gradient</text>
-        <text x="95" y="206" class="t-muted mid">blush to cream</text>
+
+        <!-- 1 paper -->
+        <rect x="20" y="30" width="150" height="130" rx="20" fill="#F3EEE9" stroke="#D9CFC8"/>
+        <text x="95" y="188" class="t mid">1 warm paper</text>
+        <text x="95" y="206" class="t-muted mid">an off-white base</text>
         <text x="193" y="102" class="t-big mid">+</text>
 
-        <rect x="215" y="30" width="150" height="130" rx="20" fill="url(#g-sky)" stroke="#E98FA9"/>
-        <circle cx="290" cy="95" r="42" fill="url(#g-orb)"/>
-        <text x="290" y="188" class="t mid">2 a soft sphere</text>
-        <text x="290" y="206" class="t-muted mid">fixed in the corner</text>
+        <!-- 2 mist -->
+        <rect x="215" y="30" width="150" height="130" rx="20" fill="#F3EEE9"/>
+        <g clip-path="url(#c-2)">
+          <ellipse cx="255" cy="70" rx="62" ry="46" fill="url(#g-butter)"/>
+          <ellipse cx="330" cy="62" rx="60" ry="46" fill="url(#g-pink)"/>
+          <ellipse cx="270" cy="140" rx="70" ry="44" fill="url(#g-sage)"/>
+        </g>
+        <rect x="215" y="30" width="150" height="130" rx="20" fill="none" stroke="#D9CFC8"/>
+        <text x="290" y="188" class="t mid">2 colour mist</text>
+        <text x="290" y="206" class="t-muted mid">drifts very slowly</text>
         <text x="388" y="102" class="t-big mid">+</text>
 
-        <rect x="410" y="30" width="150" height="130" rx="20" fill="url(#g-sky)" stroke="#E98FA9"/>
-        <circle cx="485" cy="95" r="42" fill="url(#g-orb)"/>
-        <rect x="425" y="55" width="120" height="80" rx="14" fill="#ffffff" fill-opacity="0.58"/>
-        <text x="485" y="188" class="t mid">3 white 58% + blur</text>
-        <text x="485" y="206" class="t-muted mid">backdrop-filter: 18px</text>
+        <!-- 3 grain -->
+        <rect x="410" y="30" width="150" height="130" rx="20" fill="#F3EEE9"/>
+        <g clip-path="url(#c-3)">
+          <ellipse cx="450" cy="70" rx="62" ry="46" fill="url(#g-butter)"/>
+          <ellipse cx="525" cy="62" rx="60" ry="46" fill="url(#g-pink)"/>
+          <ellipse cx="465" cy="140" rx="70" ry="44" fill="url(#g-sage)"/>
+          <rect x="410" y="30" width="150" height="130" filter="url(#f-grain)"/>
+        </g>
+        <rect x="410" y="30" width="150" height="130" rx="20" fill="none" stroke="#D9CFC8"/>
+        <text x="485" y="188" class="t mid">3 fine grain</text>
+        <text x="485" y="206" class="t-muted mid">made in the page</text>
         <text x="583" y="102" class="t-big mid">=</text>
 
-        <rect x="605" y="30" width="140" height="130" rx="20" fill="url(#g-sky)" stroke="#E98FA9"/>
-        <circle cx="675" cy="95" r="42" fill="url(#g-orb)"/>
-        <rect x="618" y="52" width="114" height="86" rx="18" fill="#ffffff" fill-opacity="0.66" stroke="#ffffff" stroke-width="2"/>
+        <!-- 4 glass on top -->
+        <rect x="605" y="30" width="140" height="130" rx="20" fill="#F3EEE9"/>
+        <g clip-path="url(#c-4)">
+          <ellipse cx="640" cy="70" rx="58" ry="44" fill="url(#g-butter)"/>
+          <ellipse cx="712" cy="62" rx="58" ry="44" fill="url(#g-pink)"/>
+          <ellipse cx="655" cy="140" rx="66" ry="42" fill="url(#g-sage)"/>
+          <rect x="605" y="30" width="140" height="130" filter="url(#f-grain)"/>
+        </g>
+        <rect x="605" y="30" width="140" height="130" rx="20" fill="none" stroke="#D9CFC8"/>
+        <rect x="620" y="52" width="110" height="86" rx="18" fill="#ffffff" fill-opacity="0.46" stroke="#ffffff" stroke-width="2"/>
         <text x="675" y="188" class="t mid">4 the glass card</text>
-        <text x="675" y="206" class="t-muted mid">+ border + soft shadow</text>
+        <text x="675" y="206" class="t-muted mid">white 46% + blur</text>
       </svg>
-      <figcaption>Where a browser cannot blur, the card simply gets more opaque, so text stays readable either way.</figcaption>
+      <figcaption>The card is see-through enough for the mist to tint it, like frosted glass in coloured light. Where a browser cannot blur, the card becomes more solid, so text stays readable either way.</figcaption>
     </figure>
   </section>
 
@@ -202,31 +225,31 @@
   <section class="guide glass stack" id="palette">
     <h2><span class="step-no">4</span> Colours, and the rules that keep it clean</h2>
     <div class="swatches">
-      <div class="swatch"><i style="background:#FBE4EA"></i><span><b>blush</b>#FBE4EA<br>surface</span></div>
-      <div class="swatch"><i style="background:#F7C6D4"></i><span><b>petal</b>#F7C6D4<br>surface</span></div>
-      <div class="swatch"><i style="background:#E98FA9"></i><span><b>rose</b>#E98FA9<br>decoration</span></div>
-      <div class="swatch"><i style="background:#C45A7E"></i><span><b>rose strong</b>#C45A7E<br>big shapes only</span></div>
-      <div class="swatch"><i style="background:#A8416A"></i><span><b>deep</b>#A8416A<br>links, small text</span></div>
+      <div class="swatch"><i style="background:#F3EEE9"></i><span><b>paper</b>#F3EEE9<br>the base</span></div>
+      <div class="swatch"><i style="background:#F4AEC2"></i><span><b>mist pink</b>#F4AEC2<br>background only</span></div>
+      <div class="swatch"><i style="background:#F1E58F"></i><span><b>mist butter</b>#F1E58F<br>background only</span></div>
+      <div class="swatch"><i style="background:#B2C79C"></i><span><b>mist sage</b>#B2C79C<br>background only</span></div>
+      <div class="swatch"><i style="background:#B9D0DE"></i><span><b>mist blue</b>#B9D0DE<br>background only</span></div>
+      <div class="swatch"><i style="background:#973A5F"></i><span><b>deep</b>#973A5F<br>links, small text</span></div>
       <div class="swatch"><i style="background:#2A2227"></i><span><b>ink</b>#2A2227<br>body text</span></div>
-      <div class="swatch"><i style="background:#6E5A65"></i><span><b>muted</b>#6E5A65<br>captions</span></div>
-      <div class="swatch"><i style="background:#FFF8F5"></i><span><b>cream</b>#FFF8F5<br>page end</span></div>
+      <div class="swatch"><i style="background:#5F4D57"></i><span><b>muted</b>#5F4D57<br>captions</span></div>
     </div>
     <table class="map">
       <tr><th>Text on&hellip;</th><th>Colour</th><th>Contrast</th></tr>
-      <tr><td>cream</td><td>ink</td><td>14.7 : 1</td></tr>
-      <tr><td>cream</td><td>muted</td><td>6.0 : 1</td></tr>
-      <tr><td>cream</td><td>deep</td><td>5.5 : 1</td></tr>
+      <tr><td>paper</td><td>ink</td><td>13.4 : 1</td></tr>
+      <tr><td>paper</td><td>muted</td><td>6.8 : 1</td></tr>
+      <tr><td>paper</td><td>deep</td><td>5.9 : 1</td></tr>
       <tr><td>the dark card</td><td>cream</td><td>14.7 : 1</td></tr>
-      <tr><td>glass over rose (worst case)</td><td>muted</td><td>4.5 : 1</td></tr>
+      <tr><td>the strongest sage mist (worst case)</td><td>muted</td><td>4.6 : 1</td></tr>
     </table>
-    <p class="muted" style="font-size: 0.9rem">The test fails the build of the theme if any of these drops below 4.5 : 1 (the WCAG level for normal text).</p>
+    <p class="muted" style="font-size: 0.9rem">The test checks text over the strongest patch of every mist colour (tinted harder than the page ever draws it) and fails if any pair drops below 4.5 : 1, the WCAG level for normal text.</p>
     <h3>The rules</h3>
     <ul class="muted">
       <li><b>One dark card per page.</b> It is the thing to look at.</li>
       <li><b>Pills for actions,</b> chips with a dot for state, glass for grouping. Nothing else.</li>
-      <li><b>Pink stays a surface, never a text colour</b> for small type. Text is ink, muted or deep.</li>
+      <li><b>The mist colours are background only,</b> never text. Text is ink, muted or deep.</li>
       <li><b>Light type for big headings,</b> regular weight for everything else.</li>
-      <li><b>Nothing moves</b> for people who asked their device to reduce motion.</li>
+      <li><b>The mist drifts very slowly</b> (about a minute per swing), and stays still for people who asked their device to reduce motion.</li>
     </ul>
   </section>
 

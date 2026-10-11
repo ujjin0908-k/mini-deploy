@@ -11,10 +11,20 @@
   --rose-strong: #C45A7E;   /* decoration and large text only: 3.9:1 on cream */
   /* text colours, each checked against its surface by scripts/test-sites.sh */
   --ink: #2A2227;           /* soft charcoal, never pure black */
-  --muted: #6E5A65;         /* secondary text, 6:1 on cream */
-  --deep: #A8416A;          /* links and small accents, 5.5:1 on cream */
+  --muted: #5F4D57;         /* secondary text; dark enough for the mist behind it too */
+  --deep: #973A5F;          /* links and small accents; dark enough over tinted glass */
   --cream: #FFF8F5;
   --amethyst: #8E6BB5;      /* decoration only */
+
+  /* "pigment mist" background: a warm paper base with soft clouds of colour.
+     Background only, never text. test-sites.sh checks text over the worst of them. */
+  --paper: #F3EEE9;
+  --mist-pink: #F4AEC2;
+  --mist-rose: #F2B2C5;
+  --mist-butter: #F1E58F;
+  --mist-sage: #B2C79C;
+  --mist-blue: #B9D0DE;
+  --mist-lilac: #D6C0E5;
   --ok: #2F7A55;
   --on-dark: #FFF8F5;
   --on-dark-muted: #E3CFD8;
@@ -37,31 +47,49 @@ body {
   color: var(--ink);
   font-family: var(--font);
   line-height: 1.55;
-  background:
-    radial-gradient(1100px 700px at 88% -8%, #F3C3D6 0%, rgba(243, 195, 214, 0) 62%),
-    radial-gradient(900px 600px at -10% 18%, #EBD8F3 0%, rgba(235, 216, 243, 0) 58%),
-    linear-gradient(180deg, #F9D7E2 0%, var(--blush) 38%, #FFF1EC 70%, var(--cream) 100%);
-  background-attachment: fixed;
+  background-color: var(--paper);
 }
 
-/* two soft glass spheres in the corners, in the spirit of the reference art */
-body::before,
+/* Layer 1: the colour mist. Big, very soft clouds drawn with gradients (cheap on
+   phones, unlike a blur filter). Kept to the edges so the middle, where text sits,
+   stays calm. The layer is larger than the screen so its slow drift never shows an edge. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -18vmax;
+  z-index: -2;
+  pointer-events: none;
+  background:
+    radial-gradient(40vmax 30vmax at 32% 32%, color-mix(in srgb, var(--mist-butter) 85%, transparent), transparent 72%),
+    radial-gradient(38vmax 30vmax at 70% 28%, color-mix(in srgb, var(--mist-pink) 85%, transparent), transparent 72%),
+    radial-gradient(42vmax 32vmax at 24% 72%, color-mix(in srgb, var(--mist-sage) 85%, transparent), transparent 72%),
+    radial-gradient(32vmax 26vmax at 52% 54%, color-mix(in srgb, var(--mist-blue) 70%, transparent), transparent 72%),
+    radial-gradient(40vmax 32vmax at 76% 70%, color-mix(in srgb, var(--mist-rose) 85%, transparent), transparent 72%),
+    radial-gradient(30vmax 24vmax at 48% 22%, color-mix(in srgb, var(--mist-lilac) 75%, transparent), transparent 72%);
+}
+
+/* Layer 2: fine film grain, generated inside the page (an SVG noise pattern), so
+   nothing is downloaded. The URL below is only the SVG name tag, not a request. */
 body::after {
   content: "";
   position: fixed;
+  inset: 0;
   z-index: -1;
-  border-radius: 50%;
   pointer-events: none;
-  background: radial-gradient(circle at 30% 28%, #fff 0%, rgba(255, 255, 255, 0.55) 16%,
-              rgba(233, 143, 169, 0.5) 55%, rgba(196, 90, 126, 0.38) 100%);
+  opacity: 0.6;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0.42 0 0 0 0 0.36 0 0 0 0 0.38 0 0 0 0.32 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)'/%3E%3C/svg%3E");
 }
-body::before { width: min(46vw, 380px); aspect-ratio: 1; right: -8vw; top: 12vh; opacity: 0.55; }
-body::after  { width: min(30vw, 240px); aspect-ratio: 1; left: -6vw; bottom: 8vh; opacity: 0.5; }
 
+/* The mist drifts very slowly (a full swing takes about a minute), and not at all
+   for anyone whose device asks for reduced motion. */
 @media (prefers-reduced-motion: no-preference) {
-  body::before { animation: drift 22s ease-in-out infinite alternate; }
-  body::after  { animation: drift 28s ease-in-out infinite alternate-reverse; }
-  @keyframes drift { to { transform: translate(-2vw, 3vh); } }
+  body::before { animation: mist-drift 64s ease-in-out infinite alternate; }
+  @keyframes mist-drift {
+    0%   { transform: translate(0, 0) rotate(0deg) scale(1); }
+    50%  { transform: translate(2.5vmax, -2vmax) rotate(4deg) scale(1.06); }
+    100% { transform: translate(-2.5vmax, 1.5vmax) rotate(-3deg) scale(1.03); }
+  }
 }
 
 .wrap { max-width: 1040px; margin: 0 auto; padding: 1.25rem 1rem 3rem; }
@@ -88,9 +116,10 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 }
 @supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
   .glass {
-    background: rgba(255, 255, 255, 0.58);
-    -webkit-backdrop-filter: blur(18px) saturate(140%);
-    backdrop-filter: blur(18px) saturate(140%);
+    /* see-through enough for the mist to tint the card, like frosted glass in coloured light */
+    background: rgba(255, 255, 255, 0.46);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    backdrop-filter: blur(20px) saturate(150%);
   }
 }
 

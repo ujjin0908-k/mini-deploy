@@ -46,7 +46,8 @@ for p in site_files:
     if p.suffix not in (".html", ".css", ".js"):
         continue
     text = p.read_text(encoding="utf-8")
-    for m in re.finditer(r"https?://|(?<![:\w])//[a-z0-9.-]+\.[a-z]{2,}", text):
+    # (the SVG namespace name inside the grain is an identifier, not something fetched)
+    for m in re.finditer(r"https?://(?!www\.w3\.org/2000/svg)|(?<![:\w])//[a-z0-9.-]+\.[a-z]{2,}", text):
         leaks.append(f"{p.relative_to(repo)}: {m.group(0)}")
     if re.search(r"@import|<link[^>]+rel=[\"']?(preconnect|dns-prefetch)", text):
         leaks.append(f"{p.relative_to(repo)}: import/preconnect")
@@ -99,9 +100,26 @@ pairs = [
     ("white number on a deep badge", (255, 255, 255), deep),
     ("ok-green chip text is ink", ink, over(0.8, blush)),
 ]
+# The mist background: text sits either right on it (headings, footers) or on glass
+# over it. Check the strongest patch of every mist colour, tinted harder (85%) than
+# anything the page actually draws, so the real page can only be better than this.
+paper = rgb(tok("paper"))
+def mist(name, strength=0.85):
+    c = rgb(tok(name))
+    return tuple(round(strength * c[i] + (1 - strength) * paper[i]) for i in range(3))
+for name in ("mist-pink", "mist-rose", "mist-butter", "mist-sage", "mist-blue", "mist-lilac"):
+    bg = mist(name)
+    pairs.append((f"ink right on the {name}", ink, bg))
+    pairs.append((f"muted right on the {name}", muted, bg))
+    # glass is white at 46% where the browser can blur (66% where it cannot): test 46%
+    pairs.append((f"muted on glass over the {name}", muted, over(0.46, bg)))
+    pairs.append((f"deep on glass over the {name}", deep, over(0.46, bg)))
+
 for name, fg, bg in pairs:
     r = ratio(fg, bg)
     check(r >= 4.5, f"contrast {name}: {r:.1f}:1")
+check("prefers-reduced-motion" in css and "mist-drift" in css.split("prefers-reduced-motion")[1],
+      "the mist only drifts when the device has not asked for reduced motion")
 sys.exit(1 if bad else 0)
 PY
 
@@ -136,7 +154,7 @@ for name in ("dashboard-explained", "demo-site-explained", "landing-explained"):
     page = (d / "index.html").read_text(encoding="utf-8")
     css = (d / "style.css").read_text(encoding="utf-8") + (d / "explain.css").read_text(encoding="utf-8")
     outside = [m.group(0) for src in (page, css)
-               for m in re.finditer(r"https?://(?!([a-z0-9-]+\.)?localhost)[^\s\"'<)]+", src)]
+               for m in re.finditer(r"https?://(?!([a-z0-9-]+\.)?localhost|www\.w3\.org/2000/svg)[^\s\"'<)]+", src)]
     check(not outside, f"{name}: nothing is fetched from elsewhere" + (f" ({outside})" if outside else ""))
     check("<script" not in page, f"{name}: no scripts at all")
     check(page.count("<h1") == 1, f"{name}: exactly one <h1>")

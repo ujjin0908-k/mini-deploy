@@ -25,23 +25,23 @@ The checks, the release folder and the atomic flip are the same for both.
 
 ## How the look is made
 
-Glass card = pink gradient background + a soft sphere + white at about 58% with a blur +
-a thin white border and a soft pink shadow. Where a browser cannot blur, the card is more opaque.
+The background is a "pigment mist": a warm paper base, six soft clouds of colour (pink, rose,
+butter yellow, sage, misty blue, lilac) that drift very slowly, and fine film grain made in the page.
+Glass card = that background + white at about 46% with a blur + a thin white border and a soft
+shadow, so the mist tints the card. Where a browser cannot blur, the card is more opaque.
 
 | Token | Hex | Used for |
 |---|---|---|
-| blush | `#FBE4EA` | surface |
-| petal | `#F7C6D4` | surface |
-| rose | `#E98FA9` | decoration |
-| rose strong | `#C45A7E` | big shapes only |
-| deep | `#A8416A` | links, small accents |
+| paper | `#F3EEE9` | the base |
+| mist pink / rose / butter / sage / blue / lilac | `#F4AEC2` `#F2B2C5` `#F1E58F` `#B2C79C` `#B9D0DE` `#D6C0E5` | background clouds only |
+| deep | `#973A5F` | links, small accents |
 | ink | `#2A2227` | body text |
-| muted | `#6E5A65` | captions |
-| cream | `#FFF8F5` | page end |
+| muted | `#5F4D57` | captions |
+| cream | `#FFF8F5` | text on the dark card |
 
-Rules: one dark card per page; pills for actions, chips for state, glass for grouping; pink is a
-surface, not a small-text colour; nothing moves if the device asks to reduce motion. Body text is
-checked at 4.5:1 contrast or better.
+Rules: one dark card per page; pills for actions, chips for state, glass for grouping; mist colours
+are background only; the mist stays still if the device asks to reduce motion. Text is checked at
+4.5:1 contrast or better over the strongest patch of every mist colour.
 
 ## One theme, many copies
 
