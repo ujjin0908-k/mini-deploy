@@ -1,7 +1,7 @@
 # mini-deploy
 fun little deployment project hhe
 
-A tiny self-hosted deploy platform (like Netlify), built step by step to learn how deploys work.
+A tiny self-hosted deploy platform, built step by step to learn how deploys work.
 
 `git push` → GitHub webhook → verify + clone → Docker build → new release folder → `current` link flips → Caddy serves it.
 

@@ -1,6 +1,6 @@
 # mini-deploy: notes for agents
 
-A small Netlify-style host, built in stages to **learn** how deploy platforms work: `git push` → webhook → build → new release folder → `current` link flips → Caddy serves the site.
+A small self-hosted deploy platform, built in stages to **learn** how deploy platforms work: `git push` → webhook → build → new release folder → `current` link flips → Caddy serves the site.
 Plan and diagrams: `Obsidian/Projects/claude add-ons/agent-patterns-and-deploy-platform.md`. Project note: `Obsidian/Projects/Mini Deploy/Mini Deploy.md`.
 
 ## Owner's working style

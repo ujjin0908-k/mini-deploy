@@ -259,7 +259,7 @@ for app in mini-deploy demo-site dashboard; do
 done
 get demo-site / | grep -q 'built with node v' && ok "demo page was built (stamp present)" || bad "demo page has no build stamp"
 get demo-site / | grep -q '__BUILT' && bad "demo page has an unreplaced placeholder"
-get mini-deploy / | grep -q 'Your own small Netlify' && ok "landing page content is there" || bad "landing page content missing"
+get mini-deploy / | grep -q 'A small, self-hosted deploy platform' && ok "landing page content is there" || bad "landing page content missing"
 [ "$(code dashboard /data.json)" = 200 ] && ok "dashboard has data.json" || bad "no data.json"
 
 echo
