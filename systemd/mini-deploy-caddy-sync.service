@@ -3,7 +3,10 @@
 [Unit]
 Description=mini-deploy: match Caddy's listening addresses to the current network
 After=mini-deploy-caddy.service
-Requisite=mini-deploy-caddy.service
+# Only while Caddy runs (its admin socket exists). A condition just skips the run quietly;
+# a dependency (Requisite=) would log a failure every 30 s while Caddy is down.
+ConditionPathExists=/run/caddy-admin.sock
+RequiresMountsFor=/mnt/c/Users/indra/Code/mini-deploy
 
 [Service]
 Type=oneshot

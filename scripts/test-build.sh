@@ -215,6 +215,66 @@ buildlog.remove_app("gone-app")
 check(not (buildlog.LOGS_ROOT / "gone-app").exists(), "remove_app deletes an app's logs")
 hdr = buildlog.write("keep-app", "fail", {"app": "keep-app", "error": "two\nlines\x1b[2J"}, "")
 check(len(buildlog.read_header(hdr)) == 2 and "\x1b" not in hdr.read_text(), "a header value cannot add a line or an escape code")
+
+# two builds finishing at once (different apps, same moment): the list must never break
+import threading
+(sites / "par-a").mkdir(); (sites / "par-b").mkdir()
+import deploy; deploy.SITES = sites
+errors = []
+def writer(app):
+    for i in range(15):
+        if buildlog.write(app, "ok", {"app": app}, f"{app} {i}\n") is None:
+            errors.append(app)
+ts = [threading.Thread(target=writer, args=(a,)) for a in ("par-a", "par-b", "keep-app")]
+[t.start() for t in ts]; [t.join() for t in ts]
+idx = json.loads((buildlog.LOGS_ROOT / "index.json").read_text())
+counts = {a["name"]: len(a["builds"]) for a in idx["apps"]}
+check(not errors and counts.get("par-a") == 15 and counts.get("par-b") == 15,
+      f"three writers at once: no write lost, index.json is valid and complete ({counts})")
+check(not list(buildlog.LOGS_ROOT.glob(".index.json*.tmp")), "no temp files left behind")
+
+# logs of an app that is gone for a month are deleted, not kept forever
+gone = buildlog.write("month-gone", "ok", {"app": "month-gone"}, "x\n")
+past = time.time() - buildlog.DELETE_GONE_AFTER - 60
+os.utime(gone, (past, past))
+buildlog.write_index(sites)
+check(not (buildlog.LOGS_ROOT / "month-gone").exists(), "logs of an app gone for a month are deleted")
+
+# a giant line without a newline, and millions of tiny lines: memory and time stay bounded
+import resource, subprocess
+sys.path.insert(0, "$REPO/scripts")
+import build
+def pump(cmd):
+    cap, tail = buildlog.Capture(), __import__("collections").deque(maxlen=40)
+    p = subprocess.Popen(["python3", "-c", cmd], stdout=subprocess.PIPE)
+    t0 = time.monotonic()
+    build.print = lambda *a, **k: None   # keep the test's own output short
+    build.pump_output(p.stdout, cap, tail)
+    del build.print
+    p.wait()
+    return cap, time.monotonic() - t0
+before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+cap, took = pump("import sys; sys.stdout.write('x' * 150_000_000)")
+grew_mb = (resource.getrusage(resource.RUSAGE_SELF).ru_maxrss - before) / 1024
+size_kb = len(cap.text().encode()) // 1024
+check(grew_mb < 80 and size_kb <= 1100, f"a 150 MB line with no newline: memory grew {grew_mb:.0f} MB, log {size_kb} KB, {took:.1f}s")
+cap, took = pump("import sys; sys.stdout.write('a\\\\n' * 2_000_000)")
+check(took < 30 and len(cap.text().encode()) <= buildlog.HEAD_BYTES + buildlog.TAIL_BYTES + 200,
+      f"2 million tiny lines: {took:.1f}s, still capped")
+
+# a log step that fails must not turn a finished deploy into an error
+build._build_locked = lambda *a, **k: "20260101-000000"
+build.sweep_stale = lambda: None
+real_write = buildlog.write
+buildlog.write = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk full"))
+pkg = tmp / "pkg"; pkg.mkdir(); (pkg / "package.json").write_text("{}")
+deploy.SITES = sites
+try:
+    got = build.build_and_deploy("keep-app", pkg)
+    check(got == "20260101-000000", "a broken log step leaves a good deploy good")
+except Exception as e:
+    check(False, f"a broken log step turned a good deploy into {type(e).__name__}: {e}")
+buildlog.write = real_write
 sys.exit(1 if bad else 0)
 PY
 

@@ -392,9 +392,11 @@ check(fine(lambda: d.check_preview(pn("demo-site", "ten"), "ten")), "empty folde
 check(raises(d.DeployError, lambda: d.check_preview(pn("demo-site", "one-more"), "one-more")), f"preview number {d.MAX_PREVIEWS + 1} is refused")
 check(fine(lambda: d.check_preview(pn("demo-site", "b00x"), "b00x")), "an existing preview can still be updated")
 check(fine(lambda: d.check_preview(pn("other-app", "b00x"), "b00x")), "another app has its own count")
-shell = d.SITES / pn("demo-site", "failed0"); (shell / ".build.lock").write_text("")
+shell = d.SITES / pn("demo-site", "failed0"); (shell / ".build.lock").write_text(""); (shell / ".branch").write_text("x\n")
 d.drop_if_empty(shell.name)
-check(not shell.exists(), "drop_if_empty removes the empty shell of a failed first build")
+check(not (shell / ".branch").exists() and (shell / ".build.lock").exists(),
+      "drop_if_empty clears a failed first build's leftovers but keeps its lock (a waiting build may hold it)")
+check(not d._is_preview_dir(shell), "and that shell does not count as a preview (no releases)")
 d.drop_if_empty(pn("demo-site", "b01x"))
 check((d.SITES / pn("demo-site", "b01x")).is_dir(), "drop_if_empty never touches a preview with releases")
 (d.SITES / "plain").mkdir(); d.drop_if_empty("plain")
@@ -637,7 +639,8 @@ BB="broken-$RUN"; BNAME=$(pname "$BB")
 g checkout -q -b "$BB"; SHA_BB=$(break_build)
 expect "push of a branch whose first build fails" 202 "$(bpush "$BB" "$SHA_BB")"
 if wait_log " $BNAME webhook - fail " 120; then ok "the failed preview build was logged"; else bad "no failure line for $BNAME"; fi
-[ ! -e "/sites/$BNAME" ] && ok "a failed FIRST build leaves no empty folder behind (it would count against the limit)" || bad "/sites/$BNAME was left behind"
+[ ! -d "/sites/$BNAME/releases" ] && [ ! -e "/sites/$BNAME/.branch" ] \
+  && ok "a failed FIRST build leaves no half-made app (no releases, so not counted or shown)" || bad "/sites/$BNAME looks like a real app"
 g checkout -q "$PB"; g branch -q -D "$BB"
 
 expect "'branch deleted' while the branch still exists (replay)" 202 "$(post push "$(guid)" "$(delbody "refs/heads/$PB")")"
@@ -660,6 +663,30 @@ $DEPLOY remove "$APP" >/dev/null 2>&1 && bad "remove accepted a normal app" || o
 [ -L "/sites/$APP/current" ] && ok "and the normal app is still there" || bad "the normal app was touched"
 $DEPLOY remove "$CNAME" | grep -q removed && [ ! -e "/sites/$CNAME" ] && ok "deploy.py remove takes a preview down" || bad "remove failed"
 ls -d /sites/.tmp-del-* >/dev/null 2>&1 && bad "a removal left a .tmp-del folder" || ok "no removal leftovers in /sites"
+
+echo
+echo "== 15. a hard kill (power off, wsl --shutdown) does not lose queued pushes =="
+CONFIG=$SRC/webhook.json
+start_server && ok "server up" || bad "server did not start"
+flock "/sites/$APP/.build.lock" sleep 12 & FL=$!; sleep 0.5
+SHA_K1=$(commit_page "$RUN-k1"); push "$SHA_K1" >/dev/null
+sleep 3                                              # the worker took K1 and waits for the lock
+SHA_K2=$(commit_page "$RUN-k2"); push "$SHA_K2" >/dev/null
+sleep 1
+grep -q "$SHA_K1" "$STATE/pending.json" 2>/dev/null && grep -q "$SHA_K2" "$STATE/pending.json" \
+  && ok "the push being built and the one waiting are both on disk before anything stops" \
+  || bad "pending.json does not hold both: $(head -c 200 "$STATE/pending.json" 2>/dev/null)"
+kill -9 "$SPID"; wait "$SPID" 2>/dev/null; SPID=""
+ok "server killed with SIGKILL (no chance to save anything at the end)"
+wait $FL 2>/dev/null
+start_server && ok "server restarted" || bad "server did not restart"
+if wait_for "marker-$RUN-k2" 150; then ok "after the restart the newest push went live: nothing was lost"; else bad "the queued push was lost in the hard kill"; fi
+stop_server
+installed=/etc/systemd/system/mini-deploy-webhook.service
+if [ -f "$installed" ]; then
+  grep -q '^RestartPreventExitStatus=1' "$installed" && ok "the real service does not restart-loop on a config error (exit 1)" || bad "service would loop on a bad config"
+  grep -q '^ProtectSystem=strict' "$installed" && ok "the real service runs in a read-only sandbox" || bad "service has no sandbox"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi

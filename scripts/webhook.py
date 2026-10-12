@@ -22,6 +22,7 @@ Standard library only.
 
 import argparse
 import collections
+import contextlib
 import hashlib
 import hmac
 import json
@@ -50,7 +51,9 @@ STATE_DIR = Path("/var/lib/mini-deploy")       # delivery ids and queued jobs su
 LEGACY_ENV = REPO_ROOT / ".env"                # where --init-env first put the secret (on /mnt/c)
 
 MAX_BODY = 1024 * 1024          # a push event is a few KB; refuse anything bigger
-TOTAL_DEADLINE = 20             # seconds for a whole request, headers and body (slowloris)
+# Seconds for a whole request, headers and body (slowloris). Through the Funnel every client
+# arrives as 127.0.0.1, so the handler cap is shared by everyone: keep slow ones short.
+TOTAL_DEADLINE = 10
 MAX_HANDLERS = 16               # concurrent requests; more get a 503 instead of a thread
 MIN_SECRET = 32                 # characters
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -256,10 +259,21 @@ class Jobs:
     jobs: at most MAX_PENDING_PREVIEWS different previews may wait, and live apps are
     always taken first, so previews can never hold up a push to main."""
 
-    def __init__(self, max_previews=None):
+    def __init__(self, max_previews=None, on_change=None):
         self.cond = threading.Condition()
         self.pending = collections.OrderedDict()
         self.max_previews = MAX_PENDING_PREVIEWS if max_previews is None else max_previews
+        # on_change(jobs) is called after every change, with the waiting jobs AND the one
+        # being built, so a hard stop (wsl --shutdown, a crash, power) loses nothing.
+        self.on_change, self.running, self.frozen = on_change, None, False
+
+    def _changed(self):  # caller holds self.cond
+        if self.on_change and not self.frozen:
+            jobs = ([self.running] if self.running else []) + list(self.pending.values())
+            try:
+                self.on_change(jobs)
+            except Exception as e:  # noqa: BLE001  (saving is a safety net, never a failure)
+                print(f"warning: could not save the queue: {e}", file=sys.stderr)
 
     def submit(self, job):
         with self.cond:
@@ -282,8 +296,16 @@ class Jobs:
                         break
                     node = node["fallback"]
             self.pending[job["app"]] = job
+            self._changed()
             self.cond.notify()
             return replaced
+
+    def done(self, job):
+        """The worker finished `job` (built, skipped or failed): it no longer needs saving."""
+        with self.cond:
+            if self.running is job:
+                self.running = None
+                self._changed()
 
     def requeue(self, job):
         """Put back a job that could not run yet (its app was busy). If a newer job for
@@ -292,6 +314,7 @@ class Jobs:
             if job["app"] in self.pending:
                 return False
             self.pending[job["app"]] = job
+            self._changed()
             self.cond.notify()
             return True
 
@@ -302,10 +325,11 @@ class Jobs:
                 if stop.is_set():
                     return None
                 self.cond.wait(timeout=1.0)
-            for app in self.pending:
-                if not deploy_mod.preview_parent(app):
-                    return self.pending.pop(app)
-            return self.pending.popitem(last=False)[1]
+            job = next((self.pending.pop(a) for a in list(self.pending) if not deploy_mod.preview_parent(a)),
+                       None) or self.pending.popitem(last=False)[1]
+            self.running = job
+            self._changed()
+            return job
 
     def drain(self):
         with self.cond:
@@ -319,11 +343,14 @@ class State:
         self.secret, self.config = secret, config
         self.state_dir = Path(state_dir) if state_dir else None
         self.seen = Seen(self.state_dir / "deliveries" if self.state_dir else None)
-        self.jobs = Jobs()
+        self.jobs = Jobs(on_change=self._persist if self.state_dir else None)
         self.stop = threading.Event()
         self.worker = None
         self._last_reject, self._suppressed = 0.0, 0
         self._lock = threading.Lock()
+
+    def _persist(self, jobs):
+        write_pending(self.state_dir, jobs)
 
     def worker_ok(self):
         return self.worker is not None and self.worker.is_alive()
@@ -352,17 +379,29 @@ def make_job(cfg, repo, sha, delivery, branch=None, action="build"):
             "action": action}
 
 
+def write_pending(state_dir, jobs):
+    """pending.json = the jobs GitHub would not resend. Written after every queue change
+    (tmp file + rename, so a crash mid-write leaves the previous version, never half a file)."""
+    path = state_dir / "pending.json"
+    if not jobs:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        return
+    tmp = state_dir / ".pending.json.tmp"
+    tmp.write_text(json.dumps(jobs), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def save_pending(state):
-    """On shutdown, keep the queued jobs: GitHub would not resend them."""
+    """Graceful stop: keep the waiting jobs on disk. The build that is running finishes
+    first, so it is not saved; nothing is written after this (frozen)."""
     if not state.state_dir:
         return
+    with state.jobs.cond:
+        state.jobs.frozen = True
     jobs = state.jobs.drain()
-    path = state.state_dir / "pending.json"
     try:
-        if jobs:
-            path.write_text(json.dumps(jobs), encoding="utf-8")
-        elif path.exists():
-            path.unlink()
+        write_pending(state.state_dir, jobs)
     except OSError as e:
         print(f"warning: could not save pending jobs: {e}", file=sys.stderr)
 
@@ -406,7 +445,6 @@ def load_pending(state):
         items = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(items, list):
             raise ValueError("not a list")
-        path.unlink()
     except (OSError, ValueError, RecursionError) as e:
         print(f"warning: pending.json could not be read ({type(e).__name__}); moved to pending.bad",
               file=sys.stderr)
@@ -424,6 +462,10 @@ def load_pending(state):
                 count += 1
         except Exception:  # noqa: BLE001  (one bad entry must not drop the others)
             continue
+    # Each restored job already rewrote pending.json (the queue saves itself), so the file
+    # was never missing in between. With nothing restored, it can go.
+    if count == 0:
+        write_pending(state.state_dir, [])
     return count
 
 
@@ -802,6 +844,8 @@ def worker(state, allow_file):
             deploy_mod.log_event(job["app"], "webhook", None, "crash", time.monotonic(),
                                  f"{job['repo']} {job['sha'][:7]} {type(e).__name__}: {e}")
             state.seen.remove(job["delivery"])
+        finally:
+            state.jobs.done(job)  # no longer needs saving (a busy retry was re-queued itself)
         try:
             import dashboard as dashboard_mod  # lazy: only the worker needs it
             dashboard_mod.maybe_refresh()      # show the new state; never raises

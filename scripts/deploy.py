@@ -154,22 +154,21 @@ def check_preview(name, branch):
 
 
 def drop_if_empty(name):
-    """A failed FIRST build of a preview leaves /sites/<name>/ holding only lock files.
-    Remove that shell, so it is not a half-made app. Never touches a folder with releases."""
+    """A failed FIRST build of a preview leaves /sites/<name>/ with no releases. Clear what
+    it may have left, but KEEP the lock files: another build of the same preview may be
+    waiting on them, and a new lock file would let a third build run alongside it. The
+    shell that stays has no releases, so it is neither counted against the preview limit
+    nor shown on the dashboard. Never touches a folder with releases."""
     if preview_parent(name) is None:
         return
     root = SITES / name
     if root.is_symlink() or not root.is_dir() or (root / "releases").exists():
         return
-    for leftover in (".lock", ".build.lock", BRANCH_FILE, BRANCH_FILE + ".tmp", ".deployed", HOLD_NAME):
+    for leftover in (BRANCH_FILE, BRANCH_FILE + ".tmp", ".deployed", HOLD_NAME):
         try:
             (root / leftover).unlink()
         except OSError:
             pass
-    try:
-        root.rmdir()  # only succeeds if nothing else is in there
-    except OSError:
-        pass
 
 
 def id_key(rid):

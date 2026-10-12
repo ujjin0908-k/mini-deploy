@@ -34,9 +34,18 @@
     # anyone on the Wi-Fi and the Tailscale Funnel (which only forwards /webhook to port
     # 9000) never get it. "logs" is a reserved app name, so nothing else can claim it.
     # This block comes before @app, and Caddy tries `handle` blocks in this order.
+    # Second gate: "from 127.0.0.1" is also true for anything on this PC that passes other
+    # people's requests along (a proxy, `tailscale serve`). Proxies add these headers, so a
+    # request carrying one is refused even from loopback. RULE: never put a proxy, Funnel or
+    # `tailscale serve` in front of :8080. The Funnel forwards only /webhook to :9000.
     @logs {
         header_regexp Host ^logs\.localhost(:[0-9]+)?$
         remote_ip 127.0.0.1 ::1
+        not header X-Forwarded-For *
+        not header Forwarded *
+        not header X-Real-IP *
+        not header Tailscale-User-Login *
+        not header Tailscale-Headers-Info *
     }
     handle @logs {
         # (a `handle`, not a bare `respond`: Caddy runs `handle` before `respond`, so a bare
@@ -51,6 +60,9 @@
         }
         # /data/... = the log files and index.json written by scripts/buildlog.py
         handle_path /data/* {
+            # A log is plain text, always: never let a browser guess another type.
+            @logfile path *.log
+            header @logfile Content-Type "text/plain; charset=utf-8"
             root * /var/log/mini-deploy/builds
             file_server
         }

@@ -107,6 +107,32 @@ def chown_tree(path, uid, gid):
             os.lchown(os.path.join(dirpath, name), uid, gid)
 
 
+CHUNK = 64 * 1024   # a "line" longer than this is handled in pieces
+
+
+def pump_output(stream, capture, tail):
+    """Read the container's output (bytes) until it ends. Build output is untrusted:
+    - read at most CHUNK bytes at a time, so one endless line without a newline can never
+      fill this (host-side) process's memory; the container's memory limit does not cover it;
+    - print only cleaned text, so escape codes cannot set the terminal title, write to the
+      clipboard or move the cursor in your terminal or the service journal;
+    - never stop reading because printing failed: an unread pipe would hang the build."""
+    while True:
+        chunk = stream.readline(CHUNK)
+        if not chunk:
+            return
+        line = chunk.decode("utf-8", "replace")
+        text = buildlog.clean(line)
+        try:
+            print(text, end="", flush=True)
+        except Exception:  # noqa: BLE001  (closed stdout, odd encoding: keep reading)
+            pass
+        if capture is not None:
+            capture.add(line)  # cleaned again inside; the log gets the full output
+        if text.strip():
+            tail.append(text.strip()[:300])
+
+
 def docker_build(work, image, install_scripts, capture=None):
     name = f"mini-deploy-build-{uuid.uuid4().hex[:12]}"
     npm = "npm ci" if install_scripts else "npm ci --ignore-scripts"
@@ -128,18 +154,8 @@ def docker_build(work, image, install_scripts, capture=None):
     # Output is echoed live and the last lines are kept, so a failure in the deploy
     # log says WHY (the reason used to exist only in the terminal).
     tail = collections.deque(maxlen=40)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, errors="replace")
-
-    def pump():
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            if capture is not None:
-                capture.add(line)  # the full output, for the build log (cleaned there)
-            if line.strip():
-                tail.append(line.strip())
-
-    reader = threading.Thread(target=pump, daemon=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    reader = threading.Thread(target=pump_output, args=(proc.stdout, capture, tail), daemon=True)
     reader.start()
     try:
         try:
@@ -179,15 +195,22 @@ def build_and_deploy(app, repo, install_scripts=False, commit=None):
         return release
     except BaseException as e:
         error = f"{type(e).__name__}: {e}" if not isinstance(e, (BuildError, deploy_mod.DeployError)) else str(e)
-        deploy_mod.drop_if_empty(app)  # a failed FIRST preview build leaves no empty folder
+        try:
+            deploy_mod.drop_if_empty(app)  # a failed FIRST preview build leaves no half-made app
+        except Exception:  # noqa: BLE001  (must never replace the real error)
+            pass
         raise
     finally:
-        # Every build gets a log, a failed one most of all. Never raises.
-        buildlog.write(app, result, {
-            "app": app, "commit": commit, "image": image, "started": started,
-            "duration": f"{time.monotonic() - t0:.1f}s", "result": result,
-            "release": release, "error": error.split("nothing was deployed:")[0].strip(),
-        }, capture.text())
+        # Every build gets a log, a failed one most of all. Fully guarded: writing a log
+        # must never turn a finished deploy into an error, or hide the real one.
+        try:
+            buildlog.write(app, result, {
+                "app": app, "commit": commit, "image": image, "started": started,
+                "duration": f"{time.monotonic() - t0:.1f}s", "result": result,
+                "release": release, "error": error.split("nothing was deployed:")[0].strip(),
+            }, capture.text)  # a callable: the text is built inside write()'s own guard
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _build_locked(app, root, repo, image, install_scripts, capture):
@@ -198,7 +221,7 @@ def _build_locked(app, root, repo, image, install_scripts, capture):
             app_dir = work / "app"
             # Keep host-only junk and secrets out of the box. Links are kept, not followed.
             shutil.copytree(repo, app_dir, symlinks=True, ignore=shutil.ignore_patterns(
-                "node_modules", ".git", "dist", ".env", ".env.*"))
+                "node_modules", ".git", "dist", ".env", ".env.*", ".npmrc"))  # .npmrc may hold a token
             uid, gid = (int(x) for x in RUN_AS.split(":"))
             chown_tree(app_dir, uid, gid)
             docker_build(app_dir, image, install_scripts, capture)

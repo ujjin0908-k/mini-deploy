@@ -13,9 +13,13 @@
 
 [Unit]
 Description=mini-deploy webhook receiver (127.0.0.1:9000, reached through Tailscale Funnel)
-# Builds need Docker, and git needs the network.
+# Builds need Docker, and git needs the network. The code lives on /mnt/c (Windows drive).
 After=network-online.target docker.service
 Wants=network-online.target docker.service
+RequiresMountsFor=/mnt/c/Users/indra/Code/mini-deploy
+# A crash restarts it, but at most 5 starts in 5 minutes: then it stays down and says so.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -24,16 +28,33 @@ WorkingDirectory=/mnt/c/Users/indra/Code/mini-deploy
 # or in the environment, and the config still refuses to listen on anything but loopback.
 ExecStart=/usr/bin/python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/webhook.py
 Environment=PYTHONUNBUFFERED=1
-# SIGTERM is the webhook's graceful stop: finish the running build (up to ~12 min), save the
-# queue to pending.json. Give it that long before systemd kills it.
+# SIGTERM is the webhook's graceful stop: finish the running build (it waits up to 700 s),
+# save the queue. Give it more than that before systemd kills it.
 KillSignal=SIGTERM
 KillMode=mixed
-TimeoutStopSec=720
-# A crash restarts it after 5 s; the queue and delivery ids are on disk, so nothing is lost.
+TimeoutStopSec=900
+# Restart after a crash. Exit status 1 = bad secret or config: restarting cannot fix that,
+# so do not loop (fix the config, then `systemctl restart`).
 Restart=on-failure
 RestartSec=5
-# Neither the webhook nor anything it starts (git, docker) may gain new privileges via setuid.
+RestartPreventExitStatus=1
+# The queue is saved to /var/lib/mini-deploy/pending.json after every change, so even a
+# hard stop (wsl --shutdown, power) loses no push; the build that was running is redone.
+
+# --- sandbox (extra protection: Docker access is already root-level, so this limits what
+#     a bug in the webhook itself could touch). Everything is read-only except:
+ProtectSystem=strict
+ReadWritePaths=/sites /var/log /var/lib/mini-deploy /var/tmp /run
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 NoNewPrivileges=yes
+MemoryMax=2G
+TasksMax=512
 UMask=0022
 # Not PrivateTmp: builds bind-mount folders under /var/tmp into Docker, and the Docker daemon
 # runs outside this service, so it must see the same /var/tmp.

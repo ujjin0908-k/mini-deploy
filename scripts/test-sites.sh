@@ -374,8 +374,18 @@ done
 # Caddy decodes %2e%2e and tidies the path, so this lands on the page itself: never outside.
 esc=$(curl -s -m 5 --resolve logs.localhost:8080:127.0.0.1 'http://logs.localhost:8080/data/%2e%2e/%2e%2e/etc/passwd')
 grep -q 'root:' <<<"$esc" && bad "an encoded ../ escaped the logs folder" || ok "an encoded ../ never leaves the logs site"
+rm -f /var/log/mini-deploy/builds/.probe-hidden
 curl -s -m 5 -I --resolve logs.localhost:8080:127.0.0.1 http://logs.localhost:8080/data/index.json | grep -qi '^x-content-type-options: nosniff' \
   && ok "logs are served with nosniff (a log is never run as a page)" || bad "no nosniff on logs"
+for h in 'X-Forwarded-For: 203.0.113.9' 'Forwarded: for=203.0.113.9' 'X-Real-IP: 203.0.113.9' 'Tailscale-User-Login: someone@example.com'; do
+  c=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H "$h" --resolve logs.localhost:8080:127.0.0.1 http://logs.localhost:8080/)
+  [ "$c" = 404 ] && ok "a proxied request (${h%%:*}) gets 404 even from 127.0.0.1" || bad "logs page answered $c with ${h%%:*}"
+done
+lastlog=$(ls -1t /var/log/mini-deploy/builds/demo-site/*.log 2>/dev/null | head -1)
+if [ -n "$lastlog" ]; then
+  curl -s -m 5 -I --resolve logs.localhost:8080:127.0.0.1 "http://logs.localhost:8080/data/demo-site/$(basename "$lastlog")" | grep -qi '^content-type: text/plain' \
+    && ok "a log file is always served as text/plain" || bad "log served with another Content-Type"
+fi
 # The real check: a connection that does NOT come from 127.0.0.1. Run a second, temporary
 # Caddy with the same config on Docker's bridge address (only this PC and its containers
 # can reach that), and ask it for the logs page from there.
@@ -401,7 +411,10 @@ lan_of() { ss -ltnH 'sport = :8080' | awk '{print $4}' | sed 's/:8080$//' | grep
 systemctl is-active -q mini-deploy-caddy && ok "Caddy runs as the service mini-deploy-caddy" || bad "the Caddy service is not running"
 systemctl is-active -q mini-deploy-caddy-sync.timer && ok "the 30 s network check is scheduled" || bad "the sync timer is not active"
 HL=/etc/mini-deploy/home-lan
-if [ -f "$HL" ] && $RC status | grep -q '^at home right now:   yes'; then
+# (not `$RC status | grep -q`: under pipefail, grep -q stopping early cuts status off and
+#  the pipe "fails" even on a match; the same trap as in run-caddy.sh)
+at_home() { local s; s=$($RC status); grep -q '^at home right now:   yes' <<<"$s"; }
+if [ -f "$HL" ] && { at_home || at_home; }; then   # asked twice, like the sync itself
   [ -n "$(lan_of)" ] && ok "at home: listening on the Wi-Fi address too ($(lan_of))" || bad "at home but not on the Wi-Fi"
   # Pretend to be on another network that hands out the same address: same address,
   # different router. Restored by the trap even if this section breaks half-way.
@@ -416,6 +429,26 @@ if [ -f "$HL" ] && $RC status | grep -q '^at home right now:   yes'; then
   [ -n "$(lan_of)" ] && ok "back home: the Wi-Fi address comes back by itself" || bad "did not return to the Wi-Fi"
 else
   [ -z "$(lan_of)" ] && ok "not at home (or home not saved): listening on this PC only" || bad "listening on $(lan_of) while not at home"
+fi
+# A reload that fails (a broken Caddyfile) must leave Caddy serving its old config, and the
+# 30 s check must back off instead of retrying every time. A broken COPY is used; the real
+# Caddyfile is never touched.
+printf 'this is { not a valid\n' > "$SRC/Caddyfile.broken"
+MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.broken" $RC reload >/dev/null 2>&1 && bad "a broken Caddyfile was accepted" \
+  || ok "a broken Caddyfile is refused"
+[ "$(code demo-site /)" = 200 ] && ok "and Caddy keeps serving with its old config" || bad "sites went down after a failed reload"
+if [ -f "$HL" ]; then
+  cp -p "$HL" "$SRC/home-lan.real2"
+  systemctl stop mini-deploy-caddy-sync.timer   # the real timer would clear the mark meanwhile
+  trap 'cp -p "$SRC/home-lan.real2" "$HL"; rm -f /run/mini-deploy-caddy-sync.failed; $RC sync >/dev/null 2>&1; systemctl start mini-deploy-caddy-sync.timer' EXIT
+  sed -i 's/^GATEWAY_MAC=.*/GATEWAY_MAC=02:00:00:00:00:01/' "$HL"       # forces "needs a reload"
+  MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.broken" $RC sync >/dev/null 2>&1
+  [ -f /run/mini-deploy-caddy-sync.failed ] && ok "a failed network reload is remembered" || bad "no failure mark"
+  t0=$(date +%s); out=$(MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.broken" $RC sync 2>&1); t1=$(date +%s)
+  [ -z "$out" ] && ok "the next check backs off (no new attempt, no log spam)" || bad "sync retried at once: $out"
+  cp -p "$SRC/home-lan.real2" "$HL"; rm -f /run/mini-deploy-caddy-sync.failed; trap - EXIT
+  $RC sync >/dev/null 2>&1; systemctl start mini-deploy-caddy-sync.timer; sleep 1
+  [ -n "$(lan_of)" ] && ok "with the real config back, the home Wi-Fi side is restored" || bad "Wi-Fi side not restored"
 fi
 noenv=$(MINI_DEPLOY_LAN_BIND= caddy adapt --adapter caddyfile --config "$REPO/caddy/Caddyfile" 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.stdin)["apps"]["http"]["servers"]; print(sorted({l for v in s.values() for l in v["listen"]}))')
 [ "$noenv" = "['127.0.0.1:8080']" ] && ok "with no home address the config is loopback only: $noenv" || bad "empty home address gives listeners $noenv"
