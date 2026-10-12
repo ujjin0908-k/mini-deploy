@@ -30,6 +30,7 @@ import fcntl
 import hashlib
 import os
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -53,7 +54,8 @@ LOCK_WAIT = int(os.environ.get("MINI_DEPLOY_LOCK_WAIT", "600"))  # seconds
 PREVIEW_SEP = "--"                 # <branch>--<app>; normal app names may not contain it
 PREVIEW_KEEP = 2                   # a preview is short-lived: keep less history
 MAX_PREVIEWS = 10                  # per app, so a burst of branches cannot fill the disk
-MIN_SLUG_ROOM = 8                  # an app name must leave this much room for the branch part
+MIN_SLUG_ROOM = 12                 # an app name must leave this much room for the branch part
+TAG_LEN = 8                        # hex characters of the branch hash added to a changed name
 
 
 class DeployError(Exception):
@@ -84,9 +86,12 @@ def preview_parent(name):
 def preview_name(app, branch):
     """The site name for a branch: lowercase, only a-z 0-9 and '-', within 40 characters.
 
-    If the branch had to be changed to fit (Feature/X, a very long name), 4 characters
+    If the branch had to be changed to fit (Feature/X, a very long name), 8 characters
     of a hash of the real name are added, so feature/x and feature-x never share one
     preview. A name that already ends like such a hash gets one too, for the same reason.
+    8, not 4: with 4 (65,536 values) someone could search for a second branch that lands
+    on the same name in under a second. The real branch is also stored in `.branch` and
+    checked (check_preview), so even a collision cannot take over another preview.
     """
     if not APP_RE.fullmatch(app) or PREVIEW_SEP in app or app.startswith("-") or app.endswith("-"):
         raise DeployError(f"{app!r} cannot have previews (needs a plain app name)")
@@ -97,25 +102,74 @@ def preview_name(app, branch):
     if not isinstance(branch, str) or not branch:
         raise DeployError("empty branch name")
     slug = re.sub(r"[^a-z0-9]+", "-", branch.lower()).strip("-")
-    if slug == branch and 3 <= len(slug) <= room and not re.search(r"-[0-9a-f]{4}$", slug):
+    if slug == branch and 3 <= len(slug) <= room and not re.search(r"-[0-9a-f]{8}$", slug):
         return f"{slug}{PREVIEW_SEP}{app}"
-    tag = hashlib.sha256(branch.encode("utf-8", "replace")).hexdigest()[:4]
-    slug = slug[:room - 5].strip("-")
+    tag = hashlib.sha256(branch.encode("utf-8", "replace")).hexdigest()[:TAG_LEN]
+    slug = slug[:room - TAG_LEN - 1].strip("-")
     return f"{slug}-{tag}{PREVIEW_SEP}{app}" if slug else f"{tag}{PREVIEW_SEP}{app}"
 
 
-def check_preview_room(name):
-    """Refuse a NEW preview once its app already has MAX_PREVIEWS. Updating one is fine."""
+BRANCH_FILE = ".branch"   # the real branch a preview belongs to (dotfile: never served)
+
+
+def preview_branch(name):
+    """The branch recorded for a preview, or None (not built yet, or made before .branch)."""
+    try:
+        return (SITES / name / BRANCH_FILE).read_text(encoding="utf-8").rstrip("\n")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def record_preview_branch(name, branch):
+    path = SITES / name / BRANCH_FILE
+    tmp = path.with_name(BRANCH_FILE + ".tmp")
+    tmp.write_text(branch + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _is_preview_dir(p):
+    """A preview that really exists: has releases. An empty folder left by a failed
+    first build does not count against the limit."""
+    return p.is_dir() and not p.is_symlink() and (p / "releases").is_dir()
+
+
+def check_preview(name, branch):
+    """Before building `branch` as preview `name`: the name must belong to this branch
+    (two branches that clean up to one name cannot overwrite each other), and a NEW
+    preview is refused once its app has MAX_PREVIEWS. Updating an existing one is fine.
+    The limit is soft: two hand-run deploys at the same moment could both pass it."""
     parent = preview_parent(name)
     if parent is None:
         raise DeployError(f"{name!r} is not a preview name")
-    if (SITES / name).exists():
+    owner = preview_branch(name)
+    if owner is not None and owner != branch:
+        raise DeployError(f"{name} belongs to another branch; refusing to overwrite it")
+    if _is_preview_dir(SITES / name):
         return
     count = sum(1 for p in SITES.glob(f"*{PREVIEW_SEP}{parent}")
-                if p.is_dir() and preview_parent(p.name) == parent)
+                if _is_preview_dir(p) and preview_parent(p.name) == parent)
     if count >= MAX_PREVIEWS:
         raise DeployError(f"preview limit reached: {parent} already has {MAX_PREVIEWS} previews "
                           f"(take one down with: deploy.py remove <preview>)")
+
+
+def drop_if_empty(name):
+    """A failed FIRST build of a preview leaves /sites/<name>/ holding only lock files.
+    Remove that shell, so it is not a half-made app. Never touches a folder with releases."""
+    if preview_parent(name) is None:
+        return
+    root = SITES / name
+    if root.is_symlink() or not root.is_dir() or (root / "releases").exists():
+        return
+    for leftover in (".lock", ".build.lock", BRANCH_FILE, BRANCH_FILE + ".tmp", ".deployed", HOLD_NAME):
+        try:
+            (root / leftover).unlink()
+        except OSError:
+            pass
+    try:
+        root.rmdir()  # only succeeds if nothing else is in there
+    except OSError:
+        pass
 
 
 def id_key(rid):
@@ -227,6 +281,17 @@ class locked:
                     err.busy = True  # lets the webhook worker retry this one once
                     raise err
                 time.sleep(0.2)
+        # The lock file lives inside the app folder. If a preview was removed while we
+        # waited, we now hold a lock on a file in the renamed folder: going on would
+        # recreate the app that was just taken down. Check it is still the same file.
+        try:
+            held, here = os.fstat(fh.fileno()), os.stat(self.path)
+            same = (held.st_dev, held.st_ino) == (here.st_dev, here.st_ino)
+        except FileNotFoundError:
+            same = False
+        if not same:
+            fh.close()
+            raise DeployError("this app was removed while waiting for its lock; nothing was done")
         self.fh = fh
 
     def __exit__(self, *exc):
@@ -467,9 +532,10 @@ def clear_hold_after_manual_deploy(app):
         print(f"{app}: hold cleared (manual deploy)")
 
 
-def remove_preview(name):
+def remove_preview(name, branch=None):
     """Take a preview down: its address answers 404 at once, then its files are deleted.
-    Only names with '--' are accepted, so a typo can never remove a normal app."""
+    Only names with '--' are accepted, so a typo can never remove a normal app.
+    branch: when given (the webhook), the preview must belong to that branch."""
     started = time.monotonic()
     try:
         if preview_parent(name) is None:
@@ -477,10 +543,16 @@ def remove_preview(name):
         root, _, current = app_paths(name)
         if root.is_symlink() or not root.is_dir():
             raise DeployError(f"no preview named {name!r}")
-        # Both locks: no deploy or build of this preview may be half-way through.
-        with locked(root), locked(root, ".build.lock"):
+        # Both locks, in the same order a build takes them (build lock, then deploy
+        # lock), so a removal and a build can never wait for each other forever.
+        with locked(root, ".build.lock"), locked(root):
+            owner = preview_branch(name)
+            if branch is not None and owner is not None and owner != branch:
+                raise DeployError(f"{name} belongs to another branch; not removed")
             live = current_id(current)
-            gone = SITES / f".tmp-del-{name}-{os.getpid()}"
+            for old in SITES.glob(".tmp-del-*"):  # leftovers of a removal that was killed half-way
+                shutil.rmtree(old, ignore_errors=True)
+            gone = SITES / f".tmp-del-{name}-{secrets.token_hex(4)}"  # never clashes with a leftover
             try:
                 os.rename(root, gone)  # one step: Caddy finds no folder from here on
             except OSError as e:
@@ -489,8 +561,6 @@ def remove_preview(name):
         log_event(name if APP_RE.fullmatch(name) else "invalid-name", "remove", None, "fail", started, str(e))
         raise
     shutil.rmtree(gone, ignore_errors=True)
-    for old in SITES.glob(".tmp-del-*"):  # leftovers of a removal that was killed half-way
-        shutil.rmtree(old, ignore_errors=True)
     log_event(name, "remove", None, "ok", started, f"was={live or '-'}")
     print(f"removed: {name}")
 
@@ -544,8 +614,13 @@ def main():
             if args.app in RESERVED_APPS:
                 raise DeployError(f"{args.app} is reserved: {RESERVED_APPS[args.app]}")
             args.app = preview_name(args.app, args.branch)  # the dashboard refresh below uses it
-            check_preview_room(args.app)
-            deploy(args.app, args.dir)
+            check_preview(args.app, args.branch)
+            try:
+                deploy(args.app, args.dir)
+            except DeployError:
+                drop_if_empty(args.app)
+                raise
+            record_preview_branch(args.app, args.branch)
             clear_hold_after_manual_deploy(args.app)
             print(f"address: http://{args.app}.localhost:8080/")
         elif args.cmd == "remove":

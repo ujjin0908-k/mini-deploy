@@ -4,6 +4,8 @@
 (function () {
   var REFRESH_MS = 30000;
   var NAME_RE = /^[a-z0-9-]{1,40}$/;
+  // Same shapes as the Caddyfile: <app>.localhost or <app>.<ip-with-dashes>.nip.io, optional port
+  var HOST_RE = /^[a-z0-9-]{1,40}\.(localhost|[0-9]{1,3}-[0-9]{1,3}-[0-9]{1,3}-[0-9]{1,3}\.nip\.io)(:[0-9]+)?$/;
 
   function el(tag, cls, text) {
     var node = document.createElement(tag);
@@ -77,11 +79,15 @@
 
     if (app.preview_of && NAME_RE.test(app.name) && NAME_RE.test(app.preview_of)) {
       // A preview lives at its own address: same host as this page, other first label.
-      var line = el("p", "muted", "preview of " + app.preview_of + " · ");
+      // Only for the two address shapes Caddy serves; anything else gets no link.
+      var line = el("p", "muted", "preview of " + app.preview_of);
       var host = location.host;
-      var link = el("a", null, "open preview");
-      link.href = location.protocol + "//" + app.name + host.slice(host.indexOf("."));
-      line.appendChild(link);
+      if (HOST_RE.test(host)) {
+        line.appendChild(document.createTextNode(" · "));
+        var link = el("a", null, "open preview");
+        link.href = location.protocol + "//" + app.name + host.slice(host.indexOf("."));
+        line.appendChild(link);
+      }
       card.appendChild(line);
     }
 

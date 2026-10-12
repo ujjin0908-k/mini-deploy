@@ -165,6 +165,14 @@ def build_and_deploy(app, repo, install_scripts=False):
     print(f"image: {image}")
     sweep_stale()
 
+    try:
+        return _build_locked(app, root, repo, image, install_scripts)
+    except BaseException:
+        deploy_mod.drop_if_empty(app)  # a failed FIRST preview build leaves no empty folder
+        raise
+
+
+def _build_locked(app, root, repo, image, install_scripts):
     # Separate from the deploy lock, so a rollback is never stuck behind a long build.
     with deploy_mod.locked(root, ".build.lock"):
         work = Path(tempfile.mkdtemp(prefix="mini-deploy-build-", dir=WORK_ROOT))
@@ -213,8 +221,10 @@ def main():
             raise BuildError(f"names with '{deploy_mod.PREVIEW_SEP}' are previews (use --preview <branch>)")
         if args.preview is not None:
             args.app = deploy_mod.preview_name(args.app, args.preview)
-            deploy_mod.check_preview_room(args.app)
+            deploy_mod.check_preview(args.app, args.preview)
         build_and_deploy(args.app, args.repo, args.install_scripts)
+        if args.preview is not None:
+            deploy_mod.record_preview_branch(args.app, args.preview)
     except (BuildError, deploy_mod.DeployError) as e:
         deploy_mod.log_event(args.app, "build", None, "fail", started, str(e))
         print(f"error: {e}", file=sys.stderr)

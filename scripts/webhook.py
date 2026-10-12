@@ -66,6 +66,8 @@ HOOK_PREFIX = "mini-deploy-hook-"
 STALE_AGE = 3600                # a leftover work folder older than this is swept
 MIN_FREE_BYTES = 2 * 1024**3    # refuse to start a build with less free disk
 MAX_CHECKOUT_BYTES = 200 * 1024**2
+MAX_PENDING_PREVIEWS = 20       # different previews waiting at once; more get a 503 (GitHub can redeliver)
+MAX_RESTORED_JOBS = 100         # jobs read back from pending.json
 SHUTDOWN_WAIT = 700             # seconds a graceful stop waits for the running build
 LOOPBACK = ("127.0.0.1",)
 
@@ -242,17 +244,30 @@ class Seen:
                 self._append(f"- {delivery}")
 
 
+class QueueFull(Exception):
+    pass
+
+
 class Jobs:
     """At most one waiting build per app. A newer push replaces an older waiting one,
-    and keeps it as a fallback in case the newer build fails."""
+    and keeps it as a fallback in case the newer build fails.
 
-    def __init__(self):
+    Every branch is its own preview app, so a flood of branches would mean a flood of
+    jobs: at most MAX_PENDING_PREVIEWS different previews may wait, and live apps are
+    always taken first, so previews can never hold up a push to main."""
+
+    def __init__(self, max_previews=None):
         self.cond = threading.Condition()
         self.pending = collections.OrderedDict()
+        self.max_previews = MAX_PENDING_PREVIEWS if max_previews is None else max_previews
 
     def submit(self, job):
         with self.cond:
             replaced = self.pending.get(job["app"])
+            if replaced is None and deploy_mod.preview_parent(job["app"]):
+                waiting = sum(1 for a in self.pending if deploy_mod.preview_parent(a))
+                if waiting >= self.max_previews:
+                    raise QueueFull(f"{waiting} previews are already waiting")
             # Only a build falls back to the build it replaced. A removal never falls back
             # (the branch is gone), and a build never falls back to a removal.
             both_builds = replaced is not None and job.get("action", "build") == "build" \
@@ -270,13 +285,26 @@ class Jobs:
             self.cond.notify()
             return replaced
 
+    def requeue(self, job):
+        """Put back a job that could not run yet (its app was busy). If a newer job for
+        the same app arrived meanwhile, that one wins and this one is dropped."""
+        with self.cond:
+            if job["app"] in self.pending:
+                return False
+            self.pending[job["app"]] = job
+            self.cond.notify()
+            return True
+
     def take(self, stop):
-        """Next job, or None once `stop` is set and nothing is waiting."""
+        """Next job, or None once `stop` is set and nothing is waiting. Live apps first."""
         with self.cond:
             while not self.pending:
                 if stop.is_set():
                     return None
                 self.cond.wait(timeout=1.0)
+            for app in self.pending:
+                if not deploy_mod.preview_parent(app):
+                    return self.pending.pop(app)
             return self.pending.popitem(last=False)[1]
 
     def drain(self):
@@ -347,7 +375,7 @@ def load_pending(state):
     if not path.exists():
         return 0
 
-    def revive(raw):
+    def revive(raw, depth=0):
         if not isinstance(raw, dict):
             return None
         repo, sha = raw.get("repo"), raw.get("sha")
@@ -364,19 +392,38 @@ def load_pending(state):
         elif not (cfg["previews"] and safe_branch(branch) and branch != cfg["branch"]):
             return None                                     # previews were switched off, or junk
         job = make_job(cfg, repo, sha, delivery, branch, action)
-        job["fallback"] = revive(raw.get("fallback"))
+        # A fallback is built without the tip check, so it must be exactly what submit()
+        # would have made: a build of the same repo and branch, at most 3 deep.
+        fb = raw.get("fallback")
+        if depth < 2 and action == "build" and isinstance(fb, dict) and fb.get("repo") == repo \
+                and fb.get("branch") == raw.get("branch") and fb.get("action", "build") == "build":
+            job["fallback"] = revive(fb, depth + 1)
         return job
 
-    count = 0
+    # Read it once and take it out of the way first: a file that cannot be read must
+    # not stop the server from starting, every time, forever.
     try:
-        for raw in json.loads(path.read_text(encoding="utf-8")):
+        items = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(items, list):
+            raise ValueError("not a list")
+        path.unlink()
+    except (OSError, ValueError, RecursionError) as e:
+        print(f"warning: pending.json could not be read ({type(e).__name__}); moved to pending.bad",
+              file=sys.stderr)
+        try:
+            path.replace(path.with_name("pending.bad"))
+        except OSError:
+            pass
+        return 0
+    count = 0
+    for raw in items[:MAX_RESTORED_JOBS]:
+        try:
             job = revive(raw)
             if job:
                 state.jobs.submit(job)
                 count += 1
-        path.unlink()
-    except (OSError, ValueError, TypeError):
-        pass
+        except Exception:  # noqa: BLE001  (one bad entry must not drop the others)
+            continue
     return count
 
 
@@ -485,7 +532,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if not state.seen.add(delivery):  # lost a race with an identical delivery
             return self._reply(202, "duplicate")
-        replaced = state.jobs.submit(job)
+        try:
+            replaced = state.jobs.submit(job)
+        except QueueFull:
+            state.seen.remove(delivery)  # not acted on: GitHub's Redeliver may try again later
+            state.log_reject("too many previews waiting")
+            return self._reply(503, "busy")
         if replaced:
             state.log("superseded", f"{replaced['sha'][:7]} replaced by {after[:7]}", job["app"])
         state.log("queued", f"{repo} {after[:7]} {job['action']} {delivery}", job["app"])
@@ -633,23 +685,35 @@ def write_deployed(app_root, sha, release):
     os.replace(tmp, app_root / ".deployed")
 
 
+def remote_tip(job, allow_file):
+    """The commit at exactly refs/heads/<branch> on the remote, or "" if there is none.
+    ls-remote matches its pattern against the END of each ref, so refs/heads/x/refs/heads/foo
+    would also match "foo": only the line naming exactly our ref counts."""
+    want = f"refs/heads/{job['branch']}"
+    out = with_retry(lambda: git(["ls-remote", "--", job["url"], want], allow_file=allow_file))
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == want and SHA_RE.fullmatch(parts[0]):
+            return parts[0]
+    return ""
+
+
 def run_job(job, allow_file, check_tip=True):
     """Returns (status, release): ok, removed, held, same, gone or stale. Raises on a real failure."""
     app_root = deploy_mod.SITES / job["app"]
+    preview = deploy_mod.preview_parent(job["app"]) is not None
     if job.get("action") == "remove":
+        if not app_root.is_dir():
+            return "gone", None                           # nothing to take down: no git call at all
         # Same freshness rule as a build: a replayed "branch deleted" must not take down
         # the preview of a branch that exists again. Only remove if the branch is gone.
-        out = with_retry(lambda: git(["ls-remote", "--", job["url"], f"refs/heads/{job['branch']}"],
-                                     allow_file=allow_file))
-        if out.strip():
+        if remote_tip(job, allow_file):
             return "stale", None
-        if not app_root.is_dir():
-            return "gone", None                           # nothing to take down
-        deploy_mod.remove_preview(job["app"])
+        deploy_mod.remove_preview(job["app"], job["branch"])  # refuses another branch's preview
         return "removed", None
 
-    if deploy_mod.preview_parent(job["app"]):
-        deploy_mod.check_preview_room(job["app"])         # at most MAX_PREVIEWS per app
+    if preview:
+        deploy_mod.check_preview(job["app"], job["branch"])  # its own branch, at most MAX_PREVIEWS
     if deploy_mod.is_held(app_root):                      # a rollback is in force
         return "held", None
     deployed = read_deployed(app_root)
@@ -663,10 +727,7 @@ def run_job(job, allow_file, check_tip=True):
     if check_tip:
         # A valid signature does not mean "latest": an old push can be redelivered or
         # replayed. Only build a commit that is still the tip of the branch.
-        out = with_retry(lambda: git(["ls-remote", "--", job["url"], f"refs/heads/{job['branch']}"],
-                                     allow_file=allow_file))
-        tip = out.split()[0] if out.split() else ""
-        if tip != job["sha"]:
+        if remote_tip(job, allow_file) != job["sha"]:
             return "stale", None
 
     check_disk()
@@ -688,6 +749,8 @@ def run_job(job, allow_file, check_tip=True):
     finally:
         shutil.rmtree(work, ignore_errors=True)
     try:
+        if preview:
+            deploy_mod.record_preview_branch(job["app"], job["branch"])
         write_deployed(app_root, job["sha"], release)
     except OSError as e:
         print(f"warning: could not record the deployed sha: {e}", file=sys.stderr)
@@ -711,8 +774,10 @@ def process(state, job, allow_file):
             state.seen.remove(j["delivery"])
             if getattr(e, "busy", False) and i == 0 and not j.get("retried"):
                 j["retried"] = True
-                state.jobs.submit(j)  # the app was busy for 10 minutes: try once more
-                deploy_mod.log_event(j["app"], "webhook", None, "requeued", started, tag)
+                # The app was busy for 10 minutes: try once more, unless a newer job for
+                # the same app is already waiting (then that one is the one to run).
+                if state.jobs.requeue(j):
+                    deploy_mod.log_event(j["app"], "webhook", None, "requeued", started, tag)
                 return
             continue
         if status in ("ok", "removed"):

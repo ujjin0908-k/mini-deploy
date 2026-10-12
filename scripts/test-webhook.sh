@@ -269,7 +269,7 @@ stop_server
 echo
 echo "== 11. units: secret file, config, retry, worker, caps, persistence =="
 REPO=$REPO python3 - <<'PY' || fail=1
-import os, sys, stat, tempfile, threading, time, json
+import os, sys, stat, shutil, tempfile, threading, time, json
 from pathlib import Path
 sys.path.insert(0, os.environ["REPO"] + "/scripts")
 import webhook as w
@@ -361,11 +361,14 @@ def fine(fn):
     except Exception:
         return False
 pn = d.preview_name
-branches = ["feature-x", "feature/x", "Feature-X", "x", "a" * 80, "fix-ab12", "dev", "feature/x-" + "b" * 60]
+branches = ["feature-x", "feature/x", "Feature-X", "x", "a" * 80, "fix-ab12cd34", "dev", "feature/x-" + "b" * 60]
 names = {b: pn("demo-site", b) for b in branches}
 check(all(d.APP_RE.fullmatch(n) and d.preview_parent(n) == "demo-site" for n in names.values()),
       f"every preview name is a valid site name with the right parent ({sorted(names.values())})")
 check(names["feature-x"] == "feature-x--demo-site", "a plain branch keeps its own name")
+import re as _re
+check(all(_re.search(r"-?[0-9a-f]{8}--demo-site$", n) for b, n in names.items() if b not in ("feature-x", "dev")),
+      "a changed name carries 8 hex characters of the branch hash (not 4: too easy to collide on purpose)")
 check(len(set(names.values())) == len(names), "different branches never share a preview (feature/x vs feature-x, Feature-X)")
 check(pn("demo-site", "feature/x") == names["feature/x"], "the same branch always gets the same name")
 check(raises(d.DeployError, lambda: pn("a" * 35, "x")), "an app name too long for previews is refused")
@@ -380,16 +383,94 @@ check(rejected == bad_b, f"hostile branch names are refused (let through: {[b fo
 
 # --- previews: at most MAX_PREVIEWS per app, removal only for previews
 d.SITES = tmp / "sites"; d.SITES.mkdir()
-for i in range(d.MAX_PREVIEWS):
-    (d.SITES / pn("demo-site", f"b{i:02d}x")).mkdir()
-check(raises(d.DeployError, lambda: d.check_preview_room(pn("demo-site", "one-more"))), f"preview number {d.MAX_PREVIEWS + 1} is refused")
-check(fine(lambda: d.check_preview_room(pn("demo-site", "b00x"))), "an existing preview can still be updated")
-check(fine(lambda: d.check_preview_room(pn("other-app", "b00x"))), "another app has its own count")
+for i in range(d.MAX_PREVIEWS - 1):
+    (d.SITES / pn("demo-site", f"b{i:02d}x") / "releases").mkdir(parents=True)
+for i in range(3):  # shells left by failed first builds: no releases, must not count
+    (d.SITES / pn("demo-site", f"failed{i}")).mkdir()
+check(fine(lambda: d.check_preview(pn("demo-site", "ten"), "ten")), "empty folders from failed builds do not count against the limit")
+(d.SITES / pn("demo-site", "ten") / "releases").mkdir(parents=True)
+check(raises(d.DeployError, lambda: d.check_preview(pn("demo-site", "one-more"), "one-more")), f"preview number {d.MAX_PREVIEWS + 1} is refused")
+check(fine(lambda: d.check_preview(pn("demo-site", "b00x"), "b00x")), "an existing preview can still be updated")
+check(fine(lambda: d.check_preview(pn("other-app", "b00x"), "b00x")), "another app has its own count")
+shell = d.SITES / pn("demo-site", "failed0"); (shell / ".build.lock").write_text("")
+d.drop_if_empty(shell.name)
+check(not shell.exists(), "drop_if_empty removes the empty shell of a failed first build")
+d.drop_if_empty(pn("demo-site", "b01x"))
+check((d.SITES / pn("demo-site", "b01x")).is_dir(), "drop_if_empty never touches a preview with releases")
+(d.SITES / "plain").mkdir(); d.drop_if_empty("plain")
+check((d.SITES / "plain").is_dir(), "drop_if_empty never touches a normal app")
+
+# --- previews: a name belongs to one branch (collision guard)
+own = pn("demo-site", "b02x")
+d.record_preview_branch(own, "b02x")
+check(raises(d.DeployError, lambda: d.check_preview(own, "someone-else")), "a branch that maps to another branch's name cannot overwrite it")
+check(fine(lambda: d.check_preview(own, "b02x")), "the owning branch can update it")
+check(raises(d.DeployError, lambda: d.remove_preview(own, "someone-else")) and (d.SITES / own).is_dir(),
+      "a delete for another branch cannot remove it")
+
 pv = d.SITES / pn("demo-site", "b00x")
-(pv / "releases" / "20260101-000000").mkdir(parents=True)
+(pv / "releases" / "20260101-000000").mkdir(parents=True, exist_ok=True)
 os.symlink("releases/20260101-000000", pv / "current")
+(d.SITES / ".tmp-del-old-leftover").mkdir()
 d.remove_preview(pv.name)
-check(not pv.exists() and not list(d.SITES.glob(".tmp-del-*")), "remove takes a preview away completely")
+check(not pv.exists() and not list(d.SITES.glob(".tmp-del-*")), "remove takes a preview away completely, and old leftovers too")
+
+# --- previews: a lock waiter must not bring a removed preview back
+lr = d.SITES / pn("demo-site", "lockrace"); (lr / "releases").mkdir(parents=True)
+res = {}
+def waiter():
+    try:
+        with d.locked(lr):
+            res["b"] = "ran"
+    except d.DeployError:
+        res["b"] = "refused"
+with d.locked(lr):
+    t = threading.Thread(target=waiter); t.start(); time.sleep(0.5)
+    os.rename(lr, d.SITES / ".tmp-del-race")      # what remove_preview does under the lock
+t.join(10)
+check(res.get("b") == "refused" and not lr.exists(), f"a deploy waiting on the lock gives up instead of recreating the removed preview ({res})")
+shutil.rmtree(d.SITES / ".tmp-del-race")
+
+# --- previews: removal and build take the locks in the same order (no 10-minute deadlock)
+d.LOCK_WAIT = 5
+lo = d.SITES / pn("demo-site", "lockorder"); (lo / "releases").mkdir(parents=True)
+order = []
+def fake_build():  # a build: build lock, a moment later the deploy lock
+    try:
+        with d.locked(lo, ".build.lock"):
+            time.sleep(1)
+            with d.locked(lo):
+                order.append("build")
+    except d.DeployError as e:
+        order.append(f"build failed: {e}")
+t = threading.Thread(target=fake_build); t.start(); time.sleep(0.3)
+t0 = time.time()
+removed = fine(lambda: d.remove_preview(lo.name))
+t.join(10)
+check(order == ["build"] and removed and time.time() - t0 < 4 and not lo.exists(),
+      f"a removal during a build waits for it, then removes (no deadlock) ({order}, {time.time() - t0:.1f}s)")
+d.LOCK_WAIT = 600
+
+# --- previews: a rollback on a preview, then pruning to 2, never deletes the live release
+src = tmp / "site"; src.mkdir(); (src / "index.html").write_text("v")
+rp = pn("demo-site", "rollprune")
+for _ in range(3):
+    d.deploy(rp, src)
+root, rels, cur = d.app_paths(rp)
+d.rollback(rp)
+live = d.current_id(cur)
+check(live in d.release_ids(rels) and len(d.release_ids(rels)) == 2, "after a rollback the older live release is still there")
+d.deploy(rp, src)
+ids = d.release_ids(rels)
+check(d.current_id(cur) in ids and len(ids) == 2, f"the next deploy keeps 2, including the live one ({ids})")
+
+# --- git ls-remote: only the exact ref counts
+real_git = w.git
+w.git = lambda args, cwd=None, allow_file=False: ("a" * 40 + "\trefs/heads/x/refs/heads/foo\n" + "b" * 40 + "\trefs/heads/foo\n")
+check(w.remote_tip({"url": "u", "branch": "foo"}, False) == "b" * 40, "the tip is read from exactly refs/heads/<branch>")
+w.git = lambda args, cwd=None, allow_file=False: "a" * 40 + "\trefs/heads/x/refs/heads/foo\n"
+check(w.remote_tip({"url": "u", "branch": "foo"}, False) == "", "a ref that only ENDS like the branch does not count")
+w.git = real_git
 (d.SITES / "demo-site").mkdir()
 check(raises(d.DeployError, lambda: d.remove_preview("demo-site")) and (d.SITES / "demo-site").is_dir(),
       "remove refuses a normal app and leaves it alone")
@@ -404,6 +485,19 @@ check(j["action"] == "remove" and j["fallback"] is None, "a removal replaces a w
 jobs.submit(mkp("0" * 40, "remove")); jobs.submit(mkp("b" * 40, "build"))
 j = jobs.take(threading.Event())
 check(j["action"] == "build" and j["fallback"] is None, "a build never falls back to a removal")
+jobs = w.Jobs(max_previews=3)
+pjob = lambda b: {"app": pn("demo-site", b), "sha": "c" * 40, "fallback": None, "action": "build"}
+for b in ("p1x", "p2x", "p3x"):
+    jobs.submit(pjob(b))
+check(raises(w.QueueFull, lambda: jobs.submit(pjob("p4x"))), "a flood of branches is capped: the 4th waiting preview is refused")
+check(fine(lambda: jobs.submit(pjob("p1x"))), "a newer push to a preview that is already waiting is still accepted")
+check(fine(lambda: jobs.submit({"app": "demo-site", "sha": "d" * 40, "fallback": None, "action": "build"})),
+      "the live app is never capped")
+check(jobs.take(threading.Event())["app"] == "demo-site", "the live app is taken first, ahead of waiting previews")
+newer = pjob("p2x"); newer["sha"] = "e" * 40
+jobs.submit(newer)
+check(not jobs.requeue(pjob("p2x")) and jobs.pending[pn("demo-site", "p2x")]["sha"] == "e" * 40,
+      "a busy job put back never replaces a newer waiting one")
 
 # --- previews: config and restored queue
 check(raises(w.ConfigError, cfg({"repos": {"a/b": {"app": "a" * 35, "previews": True}}})), "previews on an app name that is too long refused")
@@ -422,6 +516,17 @@ restored = w.load_pending(st)
 apps = sorted(j["app"] for j in st.jobs.drain())
 check(restored == 2 and apps == sorted([pn("demo-site", "feature/x"), pn("demo-site", "old")]),
       f"a restored queue keeps valid preview jobs and drops junk (got {restored}: {apps})")
+(sd / "pending.json").write_text(json.dumps([
+    {"repo": "a/b", "sha": "b" * 40, "branch": "feature/x", "action": "build",
+     "fallback": {"repo": "a/b", "sha": "f" * 40, "branch": "main", "action": "build"}},
+]))
+w.load_pending(st)
+j = st.jobs.drain()[0]
+check(j["fallback"] is None, "a restored fallback for ANOTHER branch is dropped (it would skip the tip check)")
+deep = "[" * 100000 + "]" * 100000
+(sd / "pending.json").write_text(deep)
+check(fine(lambda: w.load_pending(st)) and (sd / "pending.bad").exists() and not (sd / "pending.json").exists(),
+      "an unreadable pending.json is moved aside instead of crashing every start")
 
 # --- the worker survives SystemExit and keeps working
 done = []
@@ -527,6 +632,13 @@ done
 sleep 2
 [ "$(npreviews)" = "$np" ] && ok "no preview was made for any of them" || bad "a hostile branch made a preview"
 newlog | grep -q "push to a branch name we do not build" && ok "they are logged as ignored" || bad "hostile branches not logged"
+
+BB="broken-$RUN"; BNAME=$(pname "$BB")
+g checkout -q -b "$BB"; SHA_BB=$(break_build)
+expect "push of a branch whose first build fails" 202 "$(bpush "$BB" "$SHA_BB")"
+if wait_log " $BNAME webhook - fail " 120; then ok "the failed preview build was logged"; else bad "no failure line for $BNAME"; fi
+[ ! -e "/sites/$BNAME" ] && ok "a failed FIRST build leaves no empty folder behind (it would count against the limit)" || bad "/sites/$BNAME was left behind"
+g checkout -q "$PB"; g branch -q -D "$BB"
 
 expect "'branch deleted' while the branch still exists (replay)" 202 "$(post push "$(guid)" "$(delbody "refs/heads/$PB")")"
 if wait_log " $PNAME webhook - stale " 30; then ok "refused as stale"; else bad "replayed delete was not refused"; fi
