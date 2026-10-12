@@ -745,7 +745,7 @@ def run_job(job, allow_file, check_tip=True):
         build_dir = src / job["subdir"] if job["subdir"] else src
         if not build_dir.resolve().is_relative_to(src.resolve()):
             raise GitError("sub-folder resolves outside the checkout")
-        release = build_mod.build_and_deploy(job["app"], build_dir)
+        release = build_mod.build_and_deploy(job["app"], build_dir, commit=job["sha"])
     finally:
         shutil.rmtree(work, ignore_errors=True)
     try:

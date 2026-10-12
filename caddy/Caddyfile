@@ -25,6 +25,39 @@
     #   app1.192-168-40-241.nip.io        <- phone (nip.io answers with that LAN IP)
     @app header_regexp app Host ^([a-z0-9-]{1,40})\.(localhost|[0-9]{1,3}-[0-9]{1,3}-[0-9]{1,3}-[0-9]{1,3}\.nip\.io)(:[0-9]+)?$
 
+    # Build logs: the full output of every build. That can hold paths, git messages and
+    # (once apps have env vars) worse, so it is shown ONLY to this PC: the name must be
+    # logs.localhost AND the connection must come from the loopback address. The phone,
+    # anyone on the Wi-Fi and the Tailscale Funnel (which only forwards /webhook to port
+    # 9000) never get it. "logs" is a reserved app name, so nothing else can claim it.
+    # This block comes before @app, and Caddy tries `handle` blocks in this order.
+    @logs {
+        header_regexp Host ^logs\.localhost(:[0-9]+)?$
+        remote_ip 127.0.0.1 ::1
+    }
+    handle @logs {
+        # (a `handle`, not a bare `respond`: Caddy runs `handle` before `respond`, so a bare
+        # respond here would never fire and temp files like .index.json.tmp would be served)
+        @logdot path_regexp (^|/)\.
+        handle @logdot {
+            respond 404
+        }
+        header {
+            Cache-Control "no-cache"
+            X-Content-Type-Options "nosniff"
+        }
+        # /data/... = the log files and index.json written by scripts/buildlog.py
+        handle_path /data/* {
+            root * /var/log/mini-deploy/builds
+            file_server
+        }
+        # everything else = the page itself, straight from the repo (it is not an app)
+        handle {
+            root * /mnt/c/Users/indra/Code/mini-deploy/web/logs
+            file_server
+        }
+    }
+
     handle @app {
         # Never serve dotfiles or dot-folders (.env, .git/, .npmrc), at any depth.
         # (file_server's `hide` only matches the last path segment, so use a path match.)

@@ -17,12 +17,12 @@ get()  { curl -s -m 5 -w ' [%{http_code}]' --resolve "$1.localhost:8080:127.0.0.
 code() { curl -s -m 5 -o /dev/null -w '%{http_code}' --resolve "$1.localhost:8080:127.0.0.1" "http://$1.localhost:8080${2:-/}"; }
 
 echo "== 1. the theme copies are in step with the source =="
-for f in web/dashboard/style.css web/landing/style.css examples/static-site/src/style.css; do
+for f in web/dashboard/style.css web/landing/style.css web/logs/style.css examples/static-site/src/style.css; do
   if cmp -s "$REPO/web/theme/pink.css" "$REPO/$f"; then ok "$f matches web/theme/pink.css"
   else bad "$f is stale: run scripts/sync-theme.sh"; fi
 done
 h1_count=$(grep -c '<h1>' "$REPO/examples/static-site/src/index.html")
-h1_line=$(grep '<h1>' "$REPO/examples/static-site/src/index.html")
+h1_line=$(grep '<h1>' "$REPO/examples/static-site/src/index.html" | tr -d '\r')   # Windows git may check it out with CRLF
 [ "$h1_count" = 1 ] && [ "$h1_line" = '<h1>static-site, built with __BUILT_WITH__</h1>' ] \
   && ok "demo page keeps its one-line <h1> (the webhook test edits it)" || bad "demo <h1> changed shape: $h1_line"
 
@@ -53,15 +53,15 @@ for p in site_files:
         leaks.append(f"{p.relative_to(repo)}: import/preconnect")
 check(not leaks, "no external URLs, fonts, imports or preconnects" + (f" ({leaks})" if leaks else ""))
 
-js = (repo / "web/dashboard/app.js").read_text(encoding="utf-8")
-danger = [w for w in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function") if w in js]
-check(not danger, "dashboard JS never builds HTML from data" + (f" (found {danger})" if danger else ""))
-
-dash_html = (repo / "web/dashboard/index.html").read_text(encoding="utf-8")
-csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', dash_html)
-check(bool(csp) and "script-src 'self'" in csp.group(1) and "object-src 'none'" in csp.group(1),
-      "dashboard has a Content-Security-Policy that only allows its own scripts")
-check(not re.search(r"<script(?![^>]*\bsrc=)", dash_html), "dashboard has no inline script (the CSP would block it)")
+for site in ("dashboard", "logs"):
+    js = (repo / f"web/{site}/app.js").read_text(encoding="utf-8")
+    danger = [w for w in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function") if w in js]
+    check(not danger, f"{site} JS never builds HTML from data" + (f" (found {danger})" if danger else ""))
+    html = (repo / f"web/{site}/index.html").read_text(encoding="utf-8")
+    csp = re.search(r'http-equiv="Content-Security-Policy" content="([^"]+)"', html)
+    check(bool(csp) and "script-src 'self'" in csp.group(1) and "object-src 'none'" in csp.group(1),
+          f"{site} has a Content-Security-Policy that only allows its own scripts")
+    check(not re.search(r"<script(?![^>]*\bsrc=)", html), f"{site} has no inline script (the CSP would block it)")
 
 css = (repo / "web/theme/pink.css").read_text(encoding="utf-8")
 check("prefers-reduced-motion" in css, "animation respects prefers-reduced-motion")
@@ -294,8 +294,14 @@ after=$(ls -A /sites/dashboard/releases | grep -vc '^\.')
 
 echo
 echo "== 6. the phone address works too (nip.io name, LAN address) =="
-phone=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Host: dashboard.192-168-40-241.nip.io:8080' http://192.168.40.241:8080/)
-[ "$phone" = 200 ] && ok "dashboard.192-168-40-241.nip.io:8080 -> 200" || bad "phone-style host answered $phone"
+if ip -4 addr | grep -q 'inet 192\.168\.40\.241/'; then
+  phone=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Host: dashboard.192-168-40-241.nip.io:8080' http://192.168.40.241:8080/)
+  [ "$phone" = 200 ] && ok "dashboard.192-168-40-241.nip.io:8080 -> 200" || bad "phone-style host answered $phone"
+  lanlogs=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Host: logs.localhost:8080' http://192.168.40.241:8080/)
+  [ "$lanlogs" = 404 ] && ok "the build logs page is 404 from the Wi-Fi address" || bad "logs page answered $lanlogs on the Wi-Fi address"
+else
+  echo "skip  phone checks: this PC is not on the home Wi-Fi (no 192.168.40.241), so there is nothing to reach"
+fi
 dot=$(curl -s -m 5 -o /dev/null -w '%{http_code}' --resolve dashboard.localhost:8080:127.0.0.1 http://dashboard.localhost:8080/.hidden)
 [ "$dot" = 404 ] && ok "dotfiles are still 404" || bad "dotfile answered $dot"
 for app in dashboard demo-site mini-deploy; do
@@ -353,6 +359,40 @@ python3 "$REPO/scripts/dashboard.py" --force >/dev/null 2>&1 & r2=$!
 wait $r1; a=$?; wait $r2; b=$?
 [ $a = 0 ] && [ $b = 0 ] && ok "two refreshes at once both finish (they take turns)" || bad "concurrent refresh exit codes $a $b"
 echo "      (left behind for you to remove: /sites/$HK and $SRC)"
+
+echo
+echo "== 8. the build logs page: this PC only =="
+lcode() { curl -s -m 5 -o /dev/null -w '%{http_code}' --resolve logs.localhost:8080:127.0.0.1 "http://logs.localhost:8080$1"; }
+python3 -c "import sys; sys.path.insert(0, '$REPO/scripts'); import buildlog; buildlog.write_index()"
+[ "$(lcode /)" = 200 ] && ok "logs.localhost answers this PC" || bad "logs page answered $(lcode /)"
+[ "$(lcode /data/index.json)" = 200 ] && ok "and serves its list" || bad "index.json answered $(lcode /data/index.json)"
+curl -s -m 5 --resolve logs.localhost:8080:127.0.0.1 http://logs.localhost:8080/ | grep -q 'Build logs' && ok "it is the logs page, not an app" || bad "wrong page on logs.localhost"
+touch /var/log/mini-deploy/builds/.probe-hidden
+for p in /data/.probe-hidden /data/.index.json.tmp /.hidden /data/../../etc/passwd; do
+  c=$(lcode "$p"); [ "$c" = 404 ] && ok "logs.localhost$p -> 404" || bad "logs.localhost$p answered $c"
+done
+# Caddy decodes %2e%2e and tidies the path, so this lands on the page itself: never outside.
+esc=$(curl -s -m 5 --resolve logs.localhost:8080:127.0.0.1 'http://logs.localhost:8080/data/%2e%2e/%2e%2e/etc/passwd')
+grep -q 'root:' <<<"$esc" && bad "an encoded ../ escaped the logs folder" || ok "an encoded ../ never leaves the logs site"
+curl -s -m 5 -I --resolve logs.localhost:8080:127.0.0.1 http://logs.localhost:8080/data/index.json | grep -qi '^x-content-type-options: nosniff' \
+  && ok "logs are served with nosniff (a log is never run as a page)" || bad "no nosniff on logs"
+# The real check: a connection that does NOT come from 127.0.0.1. Run a second, temporary
+# Caddy with the same config on Docker's bridge address (only this PC and its containers
+# can reach that), and ask it for the logs page from there.
+BR=$(ip -4 -o addr show docker0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+if [ -n "$BR" ]; then
+  sed -E -e "s/^(\s*)bind .*/\1bind $BR/" -e 's/^:8080 \{/:8099 {/' -e 's|admin unix//run/caddy-admin.sock|admin off|' \
+      "$REPO/caddy/Caddyfile" > "$SRC/Caddyfile.bridge"
+  caddy run --adapter caddyfile --config "$SRC/Caddyfile.bridge" >"$SRC/caddy-bridge.out" 2>&1 & CB=$!
+  for i in $(seq 1 50); do curl -s -o /dev/null "http://$BR:8099/" && break; sleep 0.1; done
+  far=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Host: logs.localhost:8099' "http://$BR:8099/")
+  farapp=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Host: demo-site.localhost:8099' "http://$BR:8099/")
+  kill $CB 2>/dev/null; wait $CB 2>/dev/null
+  [ "$farapp" = 200 ] && ok "(control: the same server does serve apps from $BR)" || bad "control app answered $farapp: $(tail -3 "$SRC/caddy-bridge.out")"
+  [ "$far" = 404 ] && ok "a connection from another address gets 404 for the logs page" || bad "logs page answered $far to $BR"
+else
+  echo "skip  no docker0 address to test a non-local connection from"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi

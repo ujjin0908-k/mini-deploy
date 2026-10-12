@@ -67,7 +67,21 @@
     return box;
   }
 
-  function appCard(app) {
+  // The build logs page only answers this PC (Caddy checks the connection comes from
+  // 127.0.0.1), so only offer the link when this page itself was opened on this PC.
+  var ON_THIS_PC = /^[a-z0-9-]{1,40}\.localhost$/.test(location.hostname);
+  function logsLink(app, text) {
+    var link = el("a", null, text);
+    var url = new URL(location.href);   // same scheme and port as this page
+    url.hostname = "logs.localhost";
+    url.pathname = "/";
+    url.search = "";
+    url.hash = app || "";
+    link.href = url.toString();
+    return link;
+  }
+
+  function appCard(app, needsLook) {
     var card = el("article", "glass stack");
     var head = el("div", "row between");
     head.appendChild(el("h3", "app-name", app.name));
@@ -92,6 +106,11 @@
     }
 
     card.appendChild(el("p", "muted mono", app.live ? "release " + app.live : "nothing live"));
+    if (needsLook && ON_THIS_PC && NAME_RE.test(app.name)) {
+      var why = el("p", "muted", "last run failed · ");
+      why.appendChild(logsLink(app.name, "view build log"));
+      card.appendChild(why);
+    }
     if (app.deployed) {
       card.appendChild(el("p", "muted", "commit " + app.deployed));
     }
@@ -134,7 +153,11 @@
     if (!data.apps.length) {
       apps.appendChild(el("p", "muted empty", "No apps yet. Deploy one and it shows up here."));
     }
-    data.apps.forEach(function (app) { apps.appendChild(appCard(app)); });
+    var attention = data.attention || [];
+    data.apps.forEach(function (app) { apps.appendChild(appCard(app, attention.indexOf(app.name) >= 0)); });
+    var logsSlot = document.getElementById("logs-link");
+    logsSlot.textContent = "";
+    if (ON_THIS_PC) { logsSlot.appendChild(logsLink(null, "build logs (this PC only)")); }
 
     var log = document.getElementById("log");
     log.textContent = "";

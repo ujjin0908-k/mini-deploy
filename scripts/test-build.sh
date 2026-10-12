@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Stage 4 test: a repo with a build step deploys from a container build, and the
 # container is locked down. Needs Docker and Caddy running (current Caddyfile).
-# Creates the apps demo-site, probe-build and build-<pid>, plus a /tmp folder.
+# Creates the apps demo-site, probe-build, build-<pid> and logtest-<pid> (and build logs
+# for them under /var/log/mini-deploy/builds), plus a /tmp folder.
 # It never deletes anything itself; remove the leftovers with direct rm -rf commands.
 # Pass = host has no node, the built page is live, a broken or hostile build
 # changes nothing, and the build box is non-root, read-only and has no .env.
@@ -141,6 +142,79 @@ for spec, want in cases.items():
     ok = got == want
     bad += not ok
     print(("ok    " if ok else "FAIL  ") + f"engines.node={spec!r} -> node:{got}-slim")
+sys.exit(1 if bad else 0)
+PY
+
+echo
+echo "== 9. every build leaves a log, and build output cannot fake anything in it =="
+LOGS=/var/log/mini-deploy/builds
+newest() { ls -1t "$LOGS/$1"/*.log 2>/dev/null | head -1; }
+okl=$(ls -1t "$LOGS/$APP"/*-ok.log 2>/dev/null | head -1)
+[ -n "$okl" ] && grep -q '^result: ok$' "$okl" && grep -q 'built dist/ with node' "$okl" \
+  && ok "a good build's log has its header and the build's own output" || bad "no ok log for $APP ($okl)"
+failed=$(ls -1t "$LOGS/$APP"/*-fail.log 2>/dev/null | head -1)
+[ -n "$failed" ] && grep -q '^result: fail$' "$failed" && grep -q '^error: ' "$failed" \
+  && ok "a failed build's log says it failed and why" || bad "no fail log with an error line ($failed)"
+LOGAPP=logtest-$$
+make_repo "$SRC/hostile-out" '
+process.stdout.write("\x1b[31mRED\x1b[0m plain\n");
+process.stdout.write("about to be overwritten\rOVERWRITE\n");
+process.stdout.write("result: ok\nerror: none\n");
+process.stdout.write("nul\x00byte bell\x07\n");
+process.exit(1);'
+$BUILD $LOGAPP "$SRC/hostile-out" >/dev/null 2>&1
+hl=$(newest $LOGAPP)
+if [ -n "$hl" ]; then
+  ok "a build that fails before deploying still gets a log"
+  [ "$(sed -n '/^$/q;/^result: /p' "$hl")" = "result: fail" ] && ok "the header says fail; the fake 'result: ok' in the output stays below the header" || bad "header was fooled: $(head -8 "$hl")"
+  grep -qP '\x1b|\x00|\x07' "$hl" && bad "escape or control characters reached the log" || ok "colour codes, NUL and bell were cleaned out"
+  grep -q '^OVERWRITE$' "$hl" && grep -q '^about to be overwritten$' "$hl" && ok "a carriage return cannot hide the line before it" || bad "\\r handling: $(grep -a overwrit "$hl")"
+else
+  bad "no log for the failed build of $LOGAPP"
+fi
+out=$(python3 "$REPO/scripts/logs.py" $APP); grep -q 'show one:' <<<"$out" && ok "logs.py lists recent builds" || bad "logs.py list: $out"
+python3 "$REPO/scripts/logs.py" $APP last | grep -q '^app: ' && ok "logs.py prints the newest log" || bad "logs.py last"
+python3 "$REPO/scripts/logs.py" Bad_App >/dev/null 2>&1 && bad "logs.py accepted a bad name" || ok "logs.py refuses a bad app name"
+python3 - <<PY || fail=1
+import os, sys, tempfile, time, json
+from pathlib import Path
+sys.path.insert(0, "$REPO/scripts")
+import buildlog
+bad = 0
+def check(ok, msg):
+    global bad
+    print(("ok    " if ok else "FAIL  ") + msg)
+    bad += not ok
+tmp = Path(tempfile.mkdtemp(prefix="mini-deploy-logunit-"))
+buildlog.LOGS_ROOT = tmp / "builds"   # never the real folder
+sites = tmp / "sites"; (sites / "keep-app").mkdir(parents=True)
+# size cap: the start and the end stay, the middle is cut
+cap = buildlog.Capture()
+for i in range(40000):
+    cap.add(f"line {i:05d} " + "x" * 40 + "\n")
+text = cap.text()
+check(len(text.encode()) < buildlog.HEAD_BYTES + buildlog.TAIL_BYTES + 200, f"a huge log is capped ({len(text) // 1024} KB)")
+check("line 00000" in text and "line 39999" in text and "cut here" in text, "it keeps the first and the last lines and says what was cut")
+# retention
+for i in range(25):
+    buildlog.write("keep-app", "ok" if i % 2 else "fail", {"app": "keep-app", "result": "ok"}, f"build {i}\n")
+logs = buildlog.logs_of(buildlog.LOGS_ROOT / "keep-app")
+check(len(logs) == buildlog.KEEP, f"only the newest {buildlog.KEEP} logs are kept (found {len(logs)})")
+check(logs[0].read_text().endswith("build 24\n"), "newest first")
+# the index lists existing apps (and gone ones only while they are recent)
+buildlog.write("gone-app", "fail", {"app": "gone-app"}, "x\n")
+old = buildlog.write("old-gone", "fail", {"app": "old-gone"}, "x\n")
+past = time.time() - buildlog.LIST_GONE_FOR - 60
+os.utime(old, (past, past))
+buildlog.write_index(sites)
+names = [a["name"] for a in json.loads((buildlog.LOGS_ROOT / "index.json").read_text())["apps"]]
+check(names == ["gone-app", "keep-app"], f"index: existing apps, plus recently failed ones without a folder (got {names})")
+check(buildlog.write("Bad_App", "ok", {}, "x") is None and buildlog.write("ok-app", "maybe", {}, "x") is None,
+      "bad app names and results write nothing")
+buildlog.remove_app("gone-app")
+check(not (buildlog.LOGS_ROOT / "gone-app").exists(), "remove_app deletes an app's logs")
+hdr = buildlog.write("keep-app", "fail", {"app": "keep-app", "error": "two\nlines\x1b[2J"}, "")
+check(len(buildlog.read_header(hdr)) == 2 and "\x1b" not in hdr.read_text(), "a header value cannot add a line or an escape code")
 sys.exit(1 if bad else 0)
 PY
 

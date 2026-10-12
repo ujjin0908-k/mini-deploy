@@ -29,6 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deploy as deploy_mod  # reuse the same atomic release logic (stage 3)
+import buildlog              # full output of every build, readable on this PC only
 
 DEFAULT_NODE = 22
 MIN_NODE, MAX_NODE = 12, 30  # anything outside this is treated as "not a real version"
@@ -106,7 +107,7 @@ def chown_tree(path, uid, gid):
             os.lchown(os.path.join(dirpath, name), uid, gid)
 
 
-def docker_build(work, image, install_scripts):
+def docker_build(work, image, install_scripts, capture=None):
     name = f"mini-deploy-build-{uuid.uuid4().hex[:12]}"
     npm = "npm ci" if install_scripts else "npm ci --ignore-scripts"
     cmd = [
@@ -133,6 +134,8 @@ def docker_build(work, image, install_scripts):
     def pump():
         for line in proc.stdout:
             print(line, end="", flush=True)
+            if capture is not None:
+                capture.add(line)  # the full output, for the build log (cleaned there)
             if line.strip():
                 tail.append(line.strip())
 
@@ -154,7 +157,9 @@ def docker_build(work, image, install_scripts):
         raise BuildError(f"build failed (exit {rc}); nothing was deployed: {why}")
 
 
-def build_and_deploy(app, repo, install_scripts=False):
+def build_and_deploy(app, repo, install_scripts=False, commit=None):
+    """Build and deploy; returns the new release id. commit: the sha being built (the
+    webhook knows it), shown in the build log."""
     root, _, _ = deploy_mod.app_paths(app)  # validate the name before spending time
     repo = Path(repo).resolve()
     if not (repo / "package.json").is_file():
@@ -165,14 +170,27 @@ def build_and_deploy(app, repo, install_scripts=False):
     print(f"image: {image}")
     sweep_stale()
 
+    capture = buildlog.Capture()
+    started, t0 = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), time.monotonic()
+    result, release, error = "fail", None, ""
     try:
-        return _build_locked(app, root, repo, image, install_scripts)
-    except BaseException:
+        release = _build_locked(app, root, repo, image, install_scripts, capture)
+        result = "ok"
+        return release
+    except BaseException as e:
+        error = f"{type(e).__name__}: {e}" if not isinstance(e, (BuildError, deploy_mod.DeployError)) else str(e)
         deploy_mod.drop_if_empty(app)  # a failed FIRST preview build leaves no empty folder
         raise
+    finally:
+        # Every build gets a log, a failed one most of all. Never raises.
+        buildlog.write(app, result, {
+            "app": app, "commit": commit, "image": image, "started": started,
+            "duration": f"{time.monotonic() - t0:.1f}s", "result": result,
+            "release": release, "error": error.split("nothing was deployed:")[0].strip(),
+        }, capture.text())
 
 
-def _build_locked(app, root, repo, image, install_scripts):
+def _build_locked(app, root, repo, image, install_scripts, capture):
     # Separate from the deploy lock, so a rollback is never stuck behind a long build.
     with deploy_mod.locked(root, ".build.lock"):
         work = Path(tempfile.mkdtemp(prefix="mini-deploy-build-", dir=WORK_ROOT))
@@ -183,7 +201,7 @@ def _build_locked(app, root, repo, image, install_scripts):
                 "node_modules", ".git", "dist", ".env", ".env.*"))
             uid, gid = (int(x) for x in RUN_AS.split(":"))
             chown_tree(app_dir, uid, gid)
-            docker_build(app_dir, image, install_scripts)
+            docker_build(app_dir, image, install_scripts, capture)
 
             dist = app_dir / "dist"
             # The build ran untrusted code, so `dist` may be anything, including a link
