@@ -1,6 +1,7 @@
 # Stage 2/3B: one server, many sites. The first label of the Host picks the folder.
-# Run with: caddy run --config /mnt/c/Users/indra/Code/mini-deploy/caddy/Caddyfile
-# Apply changes without a restart: caddy reload --config <same path>
+# Runs as the systemd service mini-deploy-caddy (systemd/mini-deploy-caddy.service),
+# started through scripts/run-caddy.sh, which decides whether to listen on the Wi-Fi.
+# Apply changes without a restart: systemctl reload mini-deploy-caddy
 
 {
     # The admin API can replace the whole config. By default it listens on TCP
@@ -11,12 +12,14 @@
 
 # Leading ":" = no hostname, so no HTTPS/certificate logic. Plain HTTP on 8080.
 :8080 {
-    # Who can connect: this machine, and the home Wi-Fi address for phone tests.
-    # The Wi-Fi IP comes from the router and can change. If Caddy fails to start
-    # with "cannot assign requested address", update it (ipconfig on Windows).
+    # Who can connect: this machine always; the home Wi-Fi address only when we are
+    # really at home. scripts/run-caddy.sh fills MINI_DEPLOY_LAN_BIND with that address
+    # only if this PC has the home address AND the router is the home router (its MAC,
+    # saved in /etc/mini-deploy/home-lan by `run-caddy.sh remember-home`). Anywhere else
+    # it is empty, so Caddy listens on this PC only (and starts on any network).
     # NEVER use 0.0.0.0 here without a firewall rule that limits who may connect.
-    # Anyone on that Wi-Fi can read every deployed site: only deploy public content.
-    bind 127.0.0.1 192.168.40.241
+    # Anyone on the home Wi-Fi can read every deployed site: only deploy public content.
+    bind 127.0.0.1 {$MINI_DEPLOY_LAN_BIND}
 
     # The Host header is outside input. Only a valid app name (same rule as
     # the deploy script: ^[a-z0-9-]{1,40}$) may reach the filesystem path.

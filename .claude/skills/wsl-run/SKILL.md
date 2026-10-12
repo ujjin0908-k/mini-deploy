@@ -21,13 +21,19 @@ No pipes, `;`, `&&`, `$VAR` or quotes inside. PowerShell 5.1 mangles them before
 
 Example: `.claude/skills/wsl-run/probe.sh` prints which tools are installed.
 
-## 3. Long-running servers (Caddy, the webhook server): use tmux
+## 3. Long-running servers: systemd services (Caddy, the webhook)
+Both run as services that start with WSL; don't start them in tmux too (same ports).
 ```
-wsl -d Ubuntu -- tmux new-session -d -s caddy caddy run --config /mnt/c/Users/indra/Code/mini-deploy/caddy/Caddyfile
-wsl -d Ubuntu -- tmux capture-pane -p -t caddy
-wsl -d Ubuntu -- tmux kill-session -t caddy
+wsl -d Ubuntu -- systemctl status mini-deploy-caddy mini-deploy-webhook
+wsl -d Ubuntu -- systemctl reload mini-deploy-caddy        # after editing caddy/Caddyfile
+wsl -d Ubuntu -- systemctl restart mini-deploy-webhook     # after editing webhook.py or its config
+wsl -d Ubuntu -- journalctl -u mini-deploy-caddy -n 30 --no-pager
+wsl -d Ubuntu -- bash /mnt/c/Users/indra/Code/mini-deploy/scripts/run-caddy.sh status   # Wi-Fi or this PC only?
 ```
-Check logs with `capture-pane`; don't block the tool on a foreground server.
+Caddy listens on the home Wi-Fi only when `run-caddy.sh` recognises home (address + router);
+a 30 s timer follows network changes. For any other long-running one-off, use tmux
+(`tmux new-session -d -s <name> <cmd>`, `tmux capture-pane -p -t <name>`); note that
+killing a tmux session does not always stop the program in it (check with `pgrep -af`).
 `localhost` ports in WSL2 are reachable from Windows (curl or the browser pane).
 
 ## 4. Installs and destructive commands: run them directly, never inside a script

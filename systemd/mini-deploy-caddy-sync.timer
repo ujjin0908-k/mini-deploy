@@ -1,0 +1,11 @@
+# Every 30 s: does Caddy listen on the right addresses for the network we are on?
+[Unit]
+Description=mini-deploy: check the network for Caddy every 30 s
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=30s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

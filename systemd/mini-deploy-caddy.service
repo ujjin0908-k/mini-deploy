@@ -1,0 +1,35 @@
+# Caddy for mini-deploy (port 8080), run by systemd instead of a tmux window.
+# Listens on this PC always, and on the home Wi-Fi only when scripts/run-caddy.sh finds
+# the PC really is at home (see that script). The apt package's own caddy.service stays
+# disabled: it would use /etc/caddy/Caddyfile and port 80.
+#
+# Install (as root in WSL):
+#   cp /mnt/c/Users/indra/Code/mini-deploy/systemd/mini-deploy-caddy*.service \
+#      /mnt/c/Users/indra/Code/mini-deploy/systemd/mini-deploy-caddy-sync.timer /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now mini-deploy-caddy mini-deploy-caddy-sync.timer
+# Use:
+#   systemctl status mini-deploy-caddy
+#   systemctl reload mini-deploy-caddy     after editing caddy/Caddyfile (no downtime)
+#   bash scripts/run-caddy.sh status       what it listens on, and why
+
+[Unit]
+Description=Caddy for mini-deploy (127.0.0.1:8080, plus the home Wi-Fi only at home)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# systemd gives services no $HOME; Caddy would then keep its data in ./caddy of "/".
+# Same place as when it ran in tmux as root.
+Environment=HOME=/root
+WorkingDirectory=/root
+ExecStart=/bin/bash /mnt/c/Users/indra/Code/mini-deploy/scripts/run-caddy.sh run
+ExecReload=/bin/bash /mnt/c/Users/indra/Code/mini-deploy/scripts/run-caddy.sh reload
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

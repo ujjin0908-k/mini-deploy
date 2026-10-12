@@ -395,5 +395,31 @@ else
 fi
 
 echo
+echo "== 9. Caddy listens on the Wi-Fi only at home, and follows a network change =="
+RC="bash $REPO/scripts/run-caddy.sh"
+lan_of() { ss -ltnH 'sport = :8080' | awk '{print $4}' | sed 's/:8080$//' | grep -v '^127\.0\.0\.1$' | head -1; }
+systemctl is-active -q mini-deploy-caddy && ok "Caddy runs as the service mini-deploy-caddy" || bad "the Caddy service is not running"
+systemctl is-active -q mini-deploy-caddy-sync.timer && ok "the 30 s network check is scheduled" || bad "the sync timer is not active"
+HL=/etc/mini-deploy/home-lan
+if [ -f "$HL" ] && $RC status | grep -q '^at home right now:   yes'; then
+  [ -n "$(lan_of)" ] && ok "at home: listening on the Wi-Fi address too ($(lan_of))" || bad "at home but not on the Wi-Fi"
+  # Pretend to be on another network that hands out the same address: same address,
+  # different router. Restored by the trap even if this section breaks half-way.
+  cp -p "$HL" "$SRC/home-lan.real"
+  trap 'cp -p "$SRC/home-lan.real" "$HL"; $RC sync >/dev/null 2>&1' EXIT
+  sed -i 's/^GATEWAY_MAC=.*/GATEWAY_MAC=02:00:00:00:00:01/' "$HL"
+  $RC sync >/dev/null; sleep 1
+  [ -z "$(lan_of)" ] && ok "same address but another router: Caddy drops the Wi-Fi by itself (this PC only)" || bad "still listening on $(lan_of) on a 'foreign' network"
+  [ "$(code demo-site /)" = 200 ] && ok "and this PC is still served meanwhile" || bad "this PC lost the sites"
+  cp -p "$SRC/home-lan.real" "$HL"; trap - EXIT
+  $RC sync >/dev/null; sleep 1
+  [ -n "$(lan_of)" ] && ok "back home: the Wi-Fi address comes back by itself" || bad "did not return to the Wi-Fi"
+else
+  [ -z "$(lan_of)" ] && ok "not at home (or home not saved): listening on this PC only" || bad "listening on $(lan_of) while not at home"
+fi
+noenv=$(MINI_DEPLOY_LAN_BIND= caddy adapt --adapter caddyfile --config "$REPO/caddy/Caddyfile" 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.stdin)["apps"]["http"]["servers"]; print(sorted({l for v in s.values() for l in v["listen"]}))')
+[ "$noenv" = "['127.0.0.1:8080']" ] && ok "with no home address the config is loopback only: $noenv" || bad "empty home address gives listeners $noenv"
+
+echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi
 exit $fail

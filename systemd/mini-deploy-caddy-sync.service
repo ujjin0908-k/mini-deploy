@@ -1,0 +1,10 @@
+# One check: did the network change (arrived home / left home)? If so, reload Caddy so it
+# listens on the home Wi-Fi only while at home. Started every 30 s by the .timer.
+[Unit]
+Description=mini-deploy: match Caddy's listening addresses to the current network
+After=mini-deploy-caddy.service
+Requisite=mini-deploy-caddy.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /mnt/c/Users/indra/Code/mini-deploy/scripts/run-caddy.sh sync
