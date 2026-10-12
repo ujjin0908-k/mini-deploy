@@ -1,0 +1,42 @@
+# mini-deploy webhook receiver, run by systemd instead of a tmux window.
+#
+# Install (as root in WSL; the owner approves each step):
+#   cp /mnt/c/Users/indra/Code/mini-deploy/systemd/mini-deploy-webhook.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now mini-deploy-webhook
+# Use:
+#   systemctl status mini-deploy-webhook       is it running?
+#   systemctl restart mini-deploy-webhook      after changing webhook.py or config/webhook.json
+#   systemctl stop mini-deploy-webhook         graceful: finishes the running build, saves the queue
+#   journalctl -u mini-deploy-webhook -n 50    its own output (deploys are in /var/log/mini-deploy.log)
+# After editing THIS file: copy it again, then `systemctl daemon-reload` and restart.
+
+[Unit]
+Description=mini-deploy webhook receiver (127.0.0.1:9000, reached through Tailscale Funnel)
+# Builds need Docker, and git needs the network.
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/c/Users/indra/Code/mini-deploy
+# webhook.py reads its secret from /etc/mini-deploy/env itself: nothing secret is in this file
+# or in the environment, and the config still refuses to listen on anything but loopback.
+ExecStart=/usr/bin/python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/webhook.py
+Environment=PYTHONUNBUFFERED=1
+# SIGTERM is the webhook's graceful stop: finish the running build (up to ~12 min), save the
+# queue to pending.json. Give it that long before systemd kills it.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=720
+# A crash restarts it after 5 s; the queue and delivery ids are on disk, so nothing is lost.
+Restart=on-failure
+RestartSec=5
+# Neither the webhook nor anything it starts (git, docker) may gain new privileges via setuid.
+NoNewPrivileges=yes
+UMask=0022
+# Not PrivateTmp: builds bind-mount folders under /var/tmp into Docker, and the Docker daemon
+# runs outside this service, so it must see the same /var/tmp.
+
+[Install]
+WantedBy=multi-user.target
