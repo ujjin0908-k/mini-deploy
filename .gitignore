@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .venv/
 logs/
+!web/logs/
 *.log
 .claude/settings.local.json
 

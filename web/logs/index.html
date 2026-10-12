@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Build logs of the mini-deploy platform (this PC only)">
+<!-- Build output is untrusted. Besides textContent everywhere, only this site's own
+     files may run or load. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>mini-deploy build logs</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  .brand { font-weight: 600; letter-spacing: -0.01em; }
+  .builds { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.35rem; }
+  .build {
+    display: flex; flex-wrap: wrap; gap: 0.3rem 0.9rem; align-items: baseline; width: 100%;
+    text-align: left; font: inherit; color: inherit; cursor: pointer;
+    background: rgba(255, 255, 255, 0.62); border: 1px solid rgba(255, 255, 255, 0.7);
+    border-radius: var(--radius-sm); padding: 0.55rem 0.8rem;
+  }
+  .build:hover, .build[aria-current="true"] { background: rgba(255, 255, 255, 0.9); }
+  .build .when { flex: 1 1 10rem; }
+  .bad { color: var(--deep); font-weight: 600; }
+  pre.log {
+    margin: 0; max-height: 70vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    font-size: 0.8rem; line-height: 1.45;
+  }
+  .empty { padding: 1rem 0; }
+</style>
+</head>
+<body>
+<main class="wrap stack">
+
+  <header class="glass row between">
+    <div>
+      <p class="eyebrow">this PC only</p>
+      <h1 class="brand" style="font-size: clamp(1.5rem, 5vw, 2.1rem)">Build logs</h1>
+    </div>
+    <p id="updated" class="muted" style="font-size: 0.8rem"></p>
+  </header>
+
+  <section aria-labelledby="apps-title" class="stack">
+    <h2 id="apps-title">Builds</h2>
+    <div id="apps" class="grid"></div>
+  </section>
+
+  <section aria-labelledby="view-title" class="dark-card stack" id="viewer" hidden>
+    <h2 id="view-title">Log</h2>
+    <p id="view-meta" class="muted mono"></p>
+    <pre id="view-text" class="log mono" tabindex="0"></pre>
+  </section>
+
+  <footer class="muted" style="font-size: 0.82rem">
+    The full output of every build, newest first, 20 per app. Caddy only shows this page to
+    this PC (127.0.0.1); the dashboard, which your Wi-Fi can see, shows reason words only.
+    Same logs in a terminal: <code>python3 scripts/logs.py &lt;app&gt; last</code>
+  </footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
