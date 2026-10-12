@@ -1,29 +1,32 @@
 # Graph Report - mini-deploy  (2026-10-12)
 
 ## Corpus Check
-- 5 files · ~0 words
+- 13 files · ~0 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 314 nodes · 684 edges · 18 communities (13 shown, 5 thin omitted)
-- Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 12 edges (avg confidence: 0.85)
+- 374 nodes · 822 edges · 21 communities (16 shown, 5 thin omitted)
+- Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 13 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
-- deploy.py, webhook.py
-- deploy.py, webhook.py
-- test-webhook.sh
-- dashboard.py, deploy.py
+- build.py, deploy.py
 - webhook.py
+- buildlog.py, logs.py
+- test-webhook.sh
+- webhook.py
+- dashboard.py, deploy.py
+- export-diagrams.py, logs.py
 - build.py
-- export-diagrams.py
 - app.js
-- package.json
+- test-sites.sh
 - test-build.sh
+- package.json
 - test-deploy.sh
 - build.js
-- test-sites.sh
+- run-caddy.sh
 - webhook.py
+- app.js
 - probe.sh
 - run-webhook.sh
 - sync-theme.sh
@@ -36,9 +39,9 @@
 5. `remove_preview()` - 15 edges
 6. `main()` - 15 edges
 7. `main()` - 15 edges
-8. `DeployError` - 14 edges
-9. `main()` - 13 edges
-10. `app_paths()` - 11 edges
+8. `build_and_deploy()` - 14 edges
+9. `DeployError` - 14 edges
+10. `main()` - 13 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `collect_apps()` --calls--> `current_id()`  [EXTRACTED]
@@ -55,79 +58,91 @@
 ## Import Cycles
 - None detected.
 
-## Communities (18 total, 5 thin omitted)
+## Communities (21 total, 5 thin omitted)
 
-### Community 0 - "deploy.py, webhook.py"
+### Community 0 - "build.py, deploy.py"
 Cohesion: 0.06
-Nodes (40): app_paths(), check_preview(), check_tree(), cleanup_stale(), clear_hold(), clear_hold_after_manual_deploy(), current_id(), deploy() (+32 more)
+Nodes (40): main(), app_paths(), check_preview(), check_tree(), cleanup_stale(), clear_hold(), clear_hold_after_manual_deploy(), current_id() (+32 more)
 
-### Community 1 - "deploy.py, webhook.py"
+### Community 1 - "webhook.py"
 Cohesion: 0.07
-Nodes (25): record_preview_branch(), check_checkout_size(), check_disk(), ConfigError, git(), GitError, Handler, init_env() (+17 more)
+Nodes (27): check_checkout_size(), check_disk(), ConfigError, git(), GitError, Handler, init_env(), load_config() (+19 more)
 
-### Community 2 - "test-webhook.sh"
+### Community 2 - "buildlog.py, logs.py"
+Cohesion: 0.10
+Nodes (14): Capture, clean(), _key(), _locked(), logs_of(), _new_id(), prune(), read_header() (+6 more)
+
+### Community 3 - "test-webhook.sh"
 Cohesion: 0.15
 Nodes (28): bad(), body(), bpush(), break_build(), code_of(), commit_page(), expect(), g() (+20 more)
 
-### Community 3 - "dashboard.py, deploy.py"
-Cohesion: 0.14
-Nodes (13): collect(), collect_apps(), _comparable(), main(), maybe_refresh(), parse_log(), public_detail(), read_log_tail() (+5 more)
-
 ### Community 4 - "webhook.py"
-Cohesion: 0.10
-Nodes (3): Jobs, Seen, State
+Cohesion: 0.09
+Nodes (4): Jobs, QueueFull, Seen, State
 
-### Community 5 - "build.py"
+### Community 5 - "dashboard.py, deploy.py"
 Cohesion: 0.17
-Nodes (9): build_and_deploy(), _build_locked(), BuildError, chown_tree(), docker_build(), image_ref(), main(), node_major() (+1 more)
+Nodes (12): collect(), collect_apps(), _comparable(), main(), maybe_refresh(), parse_log(), public_detail(), read_log_tail() (+4 more)
 
-### Community 6 - "export-diagrams.py"
-Cohesion: 0.18
+### Community 6 - "export-diagrams.py, logs.py"
+Cohesion: 0.16
 Nodes (7): css_variables(), export(), main(), resolve(), standalone(), svg_rules(), xml_safe()
 
-### Community 7 - "app.js"
-Cohesion: 0.38
-Nodes (10): appCard(), command(), copyText(), fallback(), manual(), say(), el(), load() (+2 more)
+### Community 7 - "build.py"
+Cohesion: 0.16
+Nodes (9): build_and_deploy(), _build_locked(), BuildError, chown_tree(), docker_build(), image_ref(), node_major(), pump_output() (+1 more)
 
-### Community 8 - "package.json"
+### Community 8 - "app.js"
+Cohesion: 0.38
+Nodes (11): appCard(), command(), copyText(), fallback(), manual(), say(), el(), load() (+3 more)
+
+### Community 9 - "test-sites.sh"
+Cohesion: 0.31
+Nodes (8): at_home(), bad(), get(), jq_py(), lcode(), live_json(), ok(), test-sites.sh script
+
+### Community 10 - "test-build.sh"
+Cohesion: 0.40
+Nodes (9): bad(), expect_error(), get(), link_of(), make_repo(), MINI_DEPLOY_NO_DASHBOARD, newest(), ok() (+1 more)
+
+### Community 11 - "package.json"
 Cohesion: 0.22
 Nodes (8): description, engines, node, name, private, scripts, build, version
 
-### Community 9 - "test-build.sh"
-Cohesion: 0.44
-Nodes (8): bad(), expect_error(), get(), link_of(), make_repo(), MINI_DEPLOY_NO_DASHBOARD, ok(), test-build.sh script
-
-### Community 10 - "test-deploy.sh"
+### Community 12 - "test-deploy.sh"
 Cohesion: 0.44
 Nodes (8): bad(), expect_error(), host_get(), link_of(), live_id(), MINI_DEPLOY_NO_DASHBOARD, ok(), test-deploy.sh script
 
-### Community 11 - "build.js"
+### Community 13 - "build.js"
 Cohesion: 0.25
 Nodes (5): fs, outDir, path, srcDir, WEB_FILES
 
-### Community 12 - "test-sites.sh"
-Cohesion: 0.43
-Nodes (6): bad(), get(), jq_py(), live_json(), ok(), test-sites.sh script
+### Community 14 - "run-caddy.sh"
+Cohesion: 0.54
+Nodes (7): do_reload(), gateway_ip(), gateway_mac(), lan_bind(), listening_lan(), saved(), run-caddy.sh script
+
+### Community 16 - "app.js"
+Cohesion: 0.87
+Nodes (5): card(), el(), render(), show(), when()
 
 ## Knowledge Gaps
 - **17 isolated node(s):** `MINI_DEPLOY_NO_DASHBOARD`, `fs`, `outDir`, `path`, `srcDir` (+12 more)
-  These have ≤1 connection - possible missing edges. (Counts symbols only; 111 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+  These have ≤1 connection - possible missing edges. (Counts symbols only; 129 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **5 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Jobs` connect `webhook.py` to `deploy.py, webhook.py`?**
-  _High betweenness centrality (0.035) - this node is a cross-community bridge._
+- **Why does `Jobs` connect `webhook.py` to `webhook.py`?**
+  _High betweenness centrality (0.040) - this node is a cross-community bridge._
 - **What connects `MINI_DEPLOY_NO_DASHBOARD`, `fs`, `outDir` to the rest of the system?**
   _17 weakly-connected nodes found - possible documentation gaps or missing edges._
-- **Should `deploy.py, webhook.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.06278538812785388 - nodes in this community are weakly interconnected._
-- **Why does `Seen` connect `webhook.py` to `deploy.py, webhook.py`?**
-  _High betweenness centrality (0.032) - this node is a cross-community bridge._
-- **Should `deploy.py, webhook.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.07256894049346879 - nodes in this community are weakly interconnected._
-- **Why does `Server` connect `webhook.py` to `deploy.py, webhook.py`?**
+- **Should `build.py, deploy.py` be split into smaller, more focused modules?**
+  _Cohesion score 0.0647887323943662 - nodes in this community are weakly interconnected._
+- **Why does `Seen` connect `webhook.py` to `webhook.py`?**
   _High betweenness centrality (0.027) - this node is a cross-community bridge._
-- **Should `test-webhook.sh` be split into smaller, more focused modules?**
-  _Cohesion score 0.14838709677419354 - nodes in this community are weakly interconnected._
+- **Should `webhook.py` be split into smaller, more focused modules?**
+  _Cohesion score 0.06533575317604355 - nodes in this community are weakly interconnected._
+- **Why does `Server` connect `webhook.py` to `webhook.py`?**
+  _High betweenness centrality (0.022) - this node is a cross-community bridge._
+- **Should `buildlog.py, logs.py` be split into smaller, more focused modules?**
+  _Cohesion score 0.1028225806451613 - nodes in this community are weakly interconnected._
