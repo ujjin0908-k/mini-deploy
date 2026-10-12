@@ -33,7 +33,7 @@ FILE_RE = re.compile(r"^(\d{8}-\d{6}(?:-\d{1,3})?)-(ok|fail)\.log$")
 LIST_GONE_FOR = 7 * 24 * 3600
 DELETE_GONE_AFTER = 30 * 24 * 3600   # ... and their logs are deleted once they are this old
 LOCK_WAIT = 30                       # seconds; a log write is a small, quick step
-HEADER_KEYS = ("app", "commit", "image", "started", "duration", "result", "release", "error")
+HEADER_KEYS = ("app", "commit", "image", "env", "started", "duration", "result", "release", "error")  # env: names only
 
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]")      # colour and cursor codes
 _CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")                  # everything but tab and newline

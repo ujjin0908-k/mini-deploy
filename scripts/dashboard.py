@@ -51,6 +51,8 @@ NOT_APPS = {"webhook", "invalid-name", APP_NAME}   # log "apps" that are not rea
 # What a failure is called on the page. First match wins; checked against the error
 # message only (the build-output tail is cut off first), so output cannot pick the label.
 REASONS = [
+    ("env values", "env problem"),                       # before "git": a key may say GIT
+    ("secret appears in dist", "refused: secret in output"),
     ("timed out", "timed out"),
     ("still running", "busy"),
     ("build failed", "build failed"),

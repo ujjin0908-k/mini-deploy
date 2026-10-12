@@ -13,23 +13,28 @@ an older commit that builds slowly cannot overwrite a newer one. Standard librar
 """
 
 import argparse
+import base64
 import collections
+import html
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deploy as deploy_mod  # reuse the same atomic release logic (stage 3)
 import buildlog              # full output of every build, readable on this PC only
+import appenv                # per-app values, given to the build only
 
 DEFAULT_NODE = 22
 MIN_NODE, MAX_NODE = 12, 30  # anything outside this is treated as "not a real version"
@@ -110,18 +115,76 @@ def chown_tree(path, uid, gid):
 CHUNK = 64 * 1024   # a "line" longer than this is handled in pieces
 
 
-def pump_output(stream, capture, tail):
+HIDDEN = b"[hidden]"
+MIN_FORM = 8   # an encoded piece shorter than this would match random text
+
+
+def secret_forms(value):
+    """The ways a value commonly ends up written, as bytes: as is, as a JS/JSON string
+    (escaped quotes and backslashes, \\uXXXX, <\\/script), HTML-escaped, URL-encoded, and
+    base64 (plain and URL-safe) at each of the 3 byte alignments, so it is found inside a
+    longer base64 text too. This is a safety net for mistakes, not a wall: code that wants
+    to hide a value (reversed, split, encrypted) gets past it. The real protection is that
+    secrets only reach `npm run build`, and previews never get the live ones."""
+    raw = value.encode("utf-8")
+    forms = {raw}
+    for ascii_only in (True, False):
+        js = json.dumps(value, ensure_ascii=ascii_only)[1:-1]
+        forms |= {js.encode("utf-8"), js.replace("/", "\\/").encode("utf-8")}
+    forms.add(html.escape(value, quote=True).encode("utf-8"))
+    forms.add(html.escape(value, quote=True).replace("&#x27;", "&#39;").encode("utf-8"))
+    forms |= {urllib.parse.quote(value, safe="").encode(), urllib.parse.quote_plus(value, safe="").encode()}
+    for k in range(3):
+        # In a longer base64 text the value starts at some byte offset; dropping the first
+        # k bytes lines it up with a 3-byte group, and only whole groups are compared.
+        part = raw[k:]
+        part = part[:len(part) // 3 * 3]
+        forms |= {base64.b64encode(part), base64.urlsafe_b64encode(part)}
+    return [f for f in forms if len(f) >= MIN_FORM]
+
+
+def all_forms(secrets):
+    """{form bytes: KEY} for every secret, longest form first."""
+    found = {}
+    for key, value in secrets.items():
+        for form in secret_forms(value):
+            found.setdefault(form, key)
+    return dict(sorted(found.items(), key=lambda kv: len(kv[0]), reverse=True))
+
+
+def mask(data, forms):
+    """Replace every secret form (longest first) before anything is printed or kept."""
+    for f in forms:
+        data = data.replace(f, HIDDEN)
+    return data
+
+
+def pump_output(stream, capture, tail, forms=()):
     """Read the container's output (bytes) until it ends. Build output is untrusted:
     - read at most CHUNK bytes at a time, so one endless line without a newline can never
       fill this (host-side) process's memory; the container's memory limit does not cover it;
+    - mask secret values (and their encoded forms) first, so they reach neither the
+      terminal nor the build log;
     - print only cleaned text, so escape codes cannot set the terminal title, write to the
       clipboard or move the cursor in your terminal or the service journal;
     - never stop reading because printing failed: an unread pipe would hang the build."""
+    forms = sorted(forms, key=len, reverse=True)
+    # A secret can be cut in two by the CHUNK limit. Mask first, then hold back the last
+    # (longest form - 1) bytes of a cut line: any form not yet complete starts inside
+    # them, so it is masked whole together with the next piece. Only a FULL chunk without
+    # a newline is a cut line; a shorter one is the end of the output, and is never held.
+    hold = max((len(f) for f in forms), default=1) - 1
+    carry = b""
     while True:
         chunk = stream.readline(CHUNK)
-        if not chunk:
+        data, carry = mask(carry + chunk, forms), b""
+        if not data:
             return
-        line = chunk.decode("utf-8", "replace")
+        if len(chunk) == CHUNK and not chunk.endswith(b"\n") and hold:
+            data, carry = data[:-hold], data[-hold:]
+            if not data:
+                continue
+        line = data.decode("utf-8", "replace")
         text = buildlog.clean(line)
         try:
             print(text, end="", flush=True)
@@ -133,9 +196,22 @@ def pump_output(stream, capture, tail):
             tail.append(text.strip()[:300])
 
 
-def docker_build(work, image, install_scripts, capture=None):
+# What the docker CLIENT on the host keeps of our own environment. It needs little, and
+# nothing of ours should travel next to the app's values.
+CLIENT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TZ")
+
+
+def client_env(env):
+    base = {k: v for k, v in os.environ.items() if k in CLIENT_ENV or k.startswith("DOCKER_")}
+    return {**base, **env}
+
+
+def _run_box(work, image, script, capture, tail, env, forms, deadline):
+    """One `docker run` of `script` in the locked-down box. Returns the exit code."""
     name = f"mini-deploy-build-{uuid.uuid4().hex[:12]}"
-    npm = "npm ci" if install_scripts else "npm ci --ignore-scripts"
+    # `-e KEY` with no "=value": docker copies the value from its own environment. So the
+    # value never sits in a command line, where `ps` and the journal could show it.
+    env_args = [a for key in sorted(env) for a in ("-e", key)]
     cmd = [
         "docker", "run", "--rm", "--name", name, "--label", f"{LABEL}={int(time.time())}",
         "--pull=missing",
@@ -144,22 +220,22 @@ def docker_build(work, image, install_scripts, capture=None):
         "--security-opt", "no-new-privileges",
         "--user", RUN_AS,
         "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,size=512m",
+        *env_args,  # before our own -e flags, so HOME and the npm cache always win
         "-e", "HOME=/tmp", "-e", "npm_config_cache=/tmp/.npm",
         "--memory", "1g", "--cpus", "2", "--pids-limit", "512",
         "-v", f"{work}:/app", "-w", "/app",
         image,
-        "sh", "-c", f"{npm} && npm run build",
+        "sh", "-c", script,
     ]
     # List of arguments, no shell=True on the host. `sh -c` runs inside the box.
     # Output is echoed live and the last lines are kept, so a failure in the deploy
     # log says WHY (the reason used to exist only in the terminal).
-    tail = collections.deque(maxlen=40)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    reader = threading.Thread(target=pump_output, args=(proc.stdout, capture, tail), daemon=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=client_env(env))
+    reader = threading.Thread(target=pump_output, args=(proc.stdout, capture, tail, forms), daemon=True)
     reader.start()
     try:
         try:
-            rc = proc.wait(timeout=TIMEOUT)
+            return proc.wait(timeout=max(1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             proc.kill()
             raise BuildError(f"build timed out after {TIMEOUT}s")
@@ -168,9 +244,79 @@ def docker_build(work, image, install_scripts, capture=None):
         # Ctrl-C lands here too, so always remove it by name.
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=30)
         reader.join(timeout=5)
+
+
+def docker_build(work, image, install_scripts, capture=None, env=None, forms=()):
+    """Two boxes, one after the other, sharing only /app:
+      1. `npm ci`          with NO app values: package install steps cannot see a secret;
+      2. `npm run build`   with the app's values.
+    Same limits for both; one TIMEOUT for the pair."""
+    deadline = time.monotonic() + TIMEOUT
+    tail = collections.deque(maxlen=40)
+    npm = "npm ci" if install_scripts else "npm ci --ignore-scripts"
+    rc = _run_box(work, image, npm, capture, tail, {}, forms, deadline)
+    if rc != 0:
+        why = " | ".join(list(tail)[-4:])
+        raise BuildError(f"build failed (npm ci, exit {rc}); nothing was deployed: {why}")
+    rc = _run_box(work, image, "npm run build", capture, tail, env or {}, forms, deadline)
     if rc != 0:
         why = " | ".join(list(tail)[-4:])
         raise BuildError(f"build failed (exit {rc}); nothing was deployed: {why}")
+
+
+def _walk_strict(top):
+    """os.walk that raises instead of silently skipping a folder it cannot read."""
+    def fail(err):
+        raise err
+    return os.walk(top, onerror=fail)
+
+
+def find_secret(dist, forms):
+    """Name of the first secret whose value (or an encoded form, see secret_forms) appears
+    in a file or file name under dist, else None. forms: {bytes: KEY}.
+    - The whole tree is sized first: above the release cap it is refused before any
+      reading (deploy.py would refuse it anyway, and reading 500+ MB under the build lock
+      would only hold up the next build).
+    - Files are read in pieces with an overlap, so a value across two pieces is found.
+    - Only regular files are opened (a FIFO from the build would block the open forever);
+      links and special files are refused by deploy.py anyway.
+    - Anything odd (unreadable, vanished, too deep) is a clear BuildError, not a crash."""
+    if not forms:
+        return None
+    try:
+        total = 0
+        for dirpath, _, filenames in _walk_strict(dist):
+            for name in filenames:
+                st = os.lstat(os.path.join(dirpath, name))
+                if stat.S_ISREG(st.st_mode):
+                    total += st.st_size
+            if total > deploy_mod.MAX_RELEASE_BYTES:
+                raise BuildError(f"dist/ is larger than {deploy_mod.MAX_RELEASE_BYTES // 2**20} MB; "
+                                 "nothing was deployed")
+        hold = max(len(f) for f in forms) - 1
+        for dirpath, dirnames, filenames in _walk_strict(dist):
+            for name in dirnames + filenames:
+                for f, k in forms.items():
+                    if f in os.fsencode(name):
+                        return k
+            for name in filenames:
+                path = os.path.join(dirpath, name)
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    continue
+                with open(path, "rb") as fh:
+                    prev = b""
+                    while True:
+                        piece = fh.read(1024 * 1024)
+                        if not piece:
+                            break
+                        buf = prev + piece
+                        for f, k in forms.items():
+                            if f in buf:
+                                return k
+                        prev = buf[-hold:] if hold else b""
+    except (OSError, RecursionError) as e:
+        raise BuildError(f"could not check dist/ for secrets ({type(e).__name__}); nothing was deployed")
+    return None
 
 
 def build_and_deploy(app, repo, install_scripts=False, commit=None):
@@ -188,9 +334,9 @@ def build_and_deploy(app, repo, install_scripts=False, commit=None):
 
     capture = buildlog.Capture()
     started, t0 = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), time.monotonic()
-    result, release, error = "fail", None, ""
+    result, release, error, info = "fail", None, "", {}
     try:
-        release = _build_locked(app, root, repo, image, install_scripts, capture)
+        release = _build_locked(app, root, repo, image, install_scripts, capture, info)
         result = "ok"
         return release
     except BaseException as e:
@@ -205,7 +351,8 @@ def build_and_deploy(app, repo, install_scripts=False, commit=None):
         # must never turn a finished deploy into an error, or hide the real one.
         try:
             buildlog.write(app, result, {
-                "app": app, "commit": commit, "image": image, "started": started,
+                "app": app, "commit": commit, "image": image, "env": ", ".join(info.get("env", ())),  # names only
+                "started": started,
                 "duration": f"{time.monotonic() - t0:.1f}s", "result": result,
                 "release": release, "error": error.split("nothing was deployed:")[0].strip(),
             }, capture.text)  # a callable: the text is built inside write()'s own guard
@@ -213,9 +360,28 @@ def build_and_deploy(app, repo, install_scripts=False, commit=None):
             pass
 
 
-def _build_locked(app, root, repo, image, install_scripts, capture):
+class EnvBuildError(BuildError):
+    """The app's env file cannot be used. Building an older push would fail the same way,
+    so the webhook does not fall back on it (config = fix the file, then push again)."""
+    config = True
+
+
+def load_env(app):
+    """Values for this build (a preview gets its parent's preview values), read only once
+    the build lock is held, so a value changed while a build waited is the one used."""
+    try:
+        return appenv.for_build(app)
+    except appenv.EnvError as e:
+        raise EnvBuildError(f"env values could not be used; nothing was deployed: {e}")
+
+
+def _build_locked(app, root, repo, image, install_scripts, capture, info=None):
+    info = {} if info is None else info
     # Separate from the deploy lock, so a rollback is never stuck behind a long build.
     with deploy_mod.locked(root, ".build.lock"):
+        env, secrets = load_env(app)
+        info["env"] = sorted(env)
+        forms = all_forms(secrets)
         work = Path(tempfile.mkdtemp(prefix="mini-deploy-build-", dir=WORK_ROOT))
         try:
             app_dir = work / "app"
@@ -224,7 +390,7 @@ def _build_locked(app, root, repo, image, install_scripts, capture):
                 "node_modules", ".git", "dist", ".env", ".env.*", ".npmrc"))  # .npmrc may hold a token
             uid, gid = (int(x) for x in RUN_AS.split(":"))
             chown_tree(app_dir, uid, gid)
-            docker_build(app_dir, image, install_scripts, capture)
+            docker_build(app_dir, image, install_scripts, capture, env, list(forms))
 
             dist = app_dir / "dist"
             # The build ran untrusted code, so `dist` may be anything, including a link
@@ -235,6 +401,15 @@ def _build_locked(app, root, repo, image, install_scripts, capture):
                 raise BuildError("build finished but dist/ is missing or empty; nothing was deployed")
             if not dist.resolve().is_relative_to(app_dir.resolve()):
                 raise BuildError("dist resolves outside the work folder; nothing was deployed")
+            # Values are for the build. A secret that ends up in the site would be served
+            # to everyone who can open it, so that build is refused (mark it --public if it
+            # really belongs in the page).
+            leaked = find_secret(dist, forms)
+            if leaked:
+                # The key name goes after "nothing was deployed:", so the dashboard and the
+                # log header (which cut there) show only the reason.
+                raise BuildError(f"a secret appears in dist/; nothing was deployed: {leaked} "
+                                 f"(if it is not secret: appenv.py set ... {leaked} --public)")
             return deploy_mod.deploy(app, dist)  # the new release id
         finally:
             shutil.rmtree(work, ignore_errors=True)  # the temp copy always goes away

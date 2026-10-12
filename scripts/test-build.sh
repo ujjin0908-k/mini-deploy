@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Stage 4 test: a repo with a build step deploys from a container build, and the
 # container is locked down. Needs Docker and Caddy running (current Caddyfile).
-# Creates the apps demo-site, probe-build, build-<pid> and logtest-<pid> (and build logs
-# for them under /var/log/mini-deploy/builds), plus a /tmp folder.
+# Creates the apps demo-site, probe-build, build-<pid>, logtest-<pid>, envtest-<pid> and
+# its preview try-env--envtest-<pid> (and build logs for them under
+# /var/log/mini-deploy/builds), plus /tmp folders (mini-deploy-btest-*, -envtest-*, -envunit-*).
 # It never deletes anything itself; remove the leftovers with direct rm -rf commands.
 # Pass = host has no node, the built page is live, a broken or hostile build
 # changes nothing, and the build box is non-root, read-only and has no .env.
@@ -275,6 +276,236 @@ try:
 except Exception as e:
     check(False, f"a broken log step turned a good deploy into {type(e).__name__}: {e}")
 buildlog.write = real_write
+sys.exit(1 if bad else 0)
+PY
+
+echo
+echo "== 10. env values reach the build only: masked, never in the site, previews kept apart =="
+# A temp store, never the real /etc/mini-deploy/apps (the owner's values stay untouched).
+# The override needs the second switch, MINI_DEPLOY_TESTING=1.
+export MINI_DEPLOY_APP_ENV=$(mktemp -d /tmp/mini-deploy-envtest-XXXXXX) MINI_DEPLOY_TESTING=1
+ENVCLI="python3 $REPO/scripts/appenv.py"
+ENVAPP=envtest-$$
+SECRET="s3cret-$$-$RANDOM-zz"
+printf '%s\n' "$SECRET" | $ENVCLI set $ENVAPP API_TOKEN >/dev/null && ok "set a secret from stdin" || bad "set secret"
+printf '%s' "https://api.example.test" | $ENVCLI set $ENVAPP PUBLIC_URL --public >/dev/null && ok "set a public value" || bad "set public"
+mode=$(stat -c '%a %U' "$MINI_DEPLOY_APP_ENV/$ENVAPP.json")
+[ "$mode" = "600 root" ] && ok "the file is 600 and root's" || bad "file mode/owner: $mode"
+listed=$($ENVCLI list $ENVAPP)
+grep -q "$SECRET" <<<"$listed" && bad "list printed the secret" || ok "list never prints a secret ($(tr '\n' ' ' <<<"$listed"))"
+grep -q 'PUBLIC_URL=https://api.example.test' <<<"$listed" && ok "list shows public values" || bad "list: $listed"
+expect_error "a secret shorter than 8"   "at least 8"   bash -c "printf short | $ENVCLI set $ENVAPP SHORT"
+expect_error "NODE_OPTIONS"              "not allowed"  bash -c "printf 'xxxxxxxxx' | $ENVCLI set $ENVAPP NODE_OPTIONS"
+expect_error "an npm setting"            "not allowed"  bash -c "printf 'xxxxxxxxx' | $ENVCLI set $ENVAPP NPM_CONFIG_REGISTRY"
+expect_error "a lowercase/odd name"      "bad name"     bash -c "printf 'xxxxxxxxx' | $ENVCLI set $ENVAPP 'a;b'"
+expect_error "a preview name"            "--preview"    bash -c "printf 'xxxxxxxxx' | $ENVCLI set x--$ENVAPP KEY"
+expect_error "a bad app name"            "bad app name" bash -c "printf 'xxxxxxxxx' | $ENVCLI set ../etc KEY"
+expect_error "two lines"                 "one line"     bash -c "printf 'aaaaaaaaa\nbbbbbbbbb\n' | $ENVCLI set $ENVAPP TWO"
+for k in HTTPS_PROXY NO_PROXY SSL_CERT_FILE OPENSSL_CONF NODE_TLS_REJECT_UNAUTHORIZED TMPDIR BASH_ENV GIT_SSH_COMMAND; do
+  expect_error "$k" "not allowed" bash -c "printf 'xxxxxxxxx' | $ENVCLI set $ENVAPP $k"
+done
+expect_error "a value that is not UTF-8"  "not valid UTF-8" bash -c "printf 'abc\xff\xfedefgh' | $ENVCLI set $ENVAPP BIN"
+printf 'production' | $ENVCLI set $ENVAPP NODE_ENV --public >/dev/null && ok "NODE_ENV is allowed" || bad "NODE_ENV refused"
+$ENVCLI unset $ENVAPP NODE_ENV >/dev/null
+
+# A build that uses both values, prints the secret (must be masked) and writes only
+# the public one into the page.
+make_repo "$SRC/envok" '
+const fs = require("fs");
+const t = process.env.API_TOKEN || "";
+console.log("token is " + t + " and again " + t);
+fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/index.html", "url:" + process.env.PUBLIC_URL +
+  " has-secret:" + (t ? "yes" : "no") + " secret-len:" + t.length + "\n");'
+out=$($BUILD $ENVAPP "$SRC/envok" 2>&1); rc=$?
+[ $rc -eq 0 ] && ok "a build with values deployed" || bad "env build failed: $(tail -3 <<<"$out")"
+page=$(get $ENVAPP); echo "page says: $page"
+grep -q 'url:https://api.example.test' <<<"$page" && ok "the public value reached the build" || bad "public value missing"
+grep -q "has-secret:yes secret-len:${#SECRET}" <<<"$page" && ok "the secret reached the build, whole" || bad "secret missing in the build"
+grep -q "$SECRET" <<<"$out" && bad "the secret was printed to the terminal" || ok "terminal output has no secret"
+grep -q 'token is \[hidden\] and again \[hidden\]' <<<"$out" && ok "printed secrets show as [hidden]" || bad "no [hidden] in output"
+el=$(newest $ENVAPP)
+grep -q "$SECRET" "$el" && bad "the secret is in the build log" || ok "build log has no secret"
+grep -q '^env: API_TOKEN, PUBLIC_URL$' "$el" && ok "the log header lists the names only" || bad "env header: $(grep '^env' "$el")"
+grep -rq "$SECRET" "/sites/$ENVAPP/" && bad "the secret is in /sites" || ok "the secret is nowhere in the release"
+grep -q "$SECRET" /var/log/mini-deploy.log && bad "the secret is in the deploy log" || ok "deploy log has no secret"
+
+# A build that puts the secret into the site is refused; the live page stays.
+before=$(link_of $ENVAPP)
+make_repo "$SRC/envleak" '
+const fs = require("fs"); fs.mkdirSync("dist/js", { recursive: true });
+fs.writeFileSync("dist/index.html", "<h1>hi</h1>");
+fs.writeFileSync("dist/js/app.js", "x".repeat(1048570) + "const k=\"" + process.env.API_TOKEN + "\";");'
+expect_error "a secret written into dist (across a 1 MB read boundary)" "secret appears in dist.*API_TOKEN" $BUILD $ENVAPP "$SRC/envleak"
+# The same secret, but the way bundlers and auth code write it: base64 inside a longer
+# text (a Basic auth header), and a JS string of a secret with quotes and slashes.
+make_repo "$SRC/envb64" '
+const fs = require("fs"); fs.mkdirSync("dist", { recursive: true });
+const h = Buffer.from("user:" + process.env.API_TOKEN).toString("base64");
+console.log("auth header " + h);
+fs.writeFileSync("dist/index.html", "<script>fetch(\"/x\",{headers:{Authorization:\"Basic " + h + "\"}})</script>");'
+out=$($BUILD $ENVAPP "$SRC/envb64" 2>&1)
+grep -q '^error:.*secret appears in dist' <<<"$out" && ok "a base64-encoded secret in dist is refused" || bad "base64 leak: $(tail -2 <<<"$out")"
+grep -q 'auth header .*\[hidden\]' <<<"$out" && ok "the base64 form is masked in the output too" || bad "base64 not masked: $(grep 'auth header' <<<"$out")"
+QUOTED="a\"b/c\\d</x>-$$-q"
+printf '%s' "$QUOTED" | $ENVCLI set $ENVAPP QUOTED_TOKEN >/dev/null
+make_repo "$SRC/envjson" '
+const fs = require("fs"); fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/index.html", "<h1>x</h1>");
+fs.writeFileSync("dist/cfg.js", "window.cfg=" + JSON.stringify({ t: process.env.QUOTED_TOKEN }).replace(/\//g, "\\/") + ";");'
+expect_error "a secret with quotes written as a JS string" "secret appears in dist.*QUOTED_TOKEN" $BUILD $ENVAPP "$SRC/envjson"
+$ENVCLI unset $ENVAPP QUOTED_TOKEN >/dev/null
+[ "$(link_of $ENVAPP)" = "$before" ] && ok "current did not move" || bad "current moved after a leak"
+
+# npm ci runs in its own box WITHOUT the values: an install script cannot see a secret.
+make_repo "$SRC/envinstall" '
+const fs = require("fs"); fs.mkdirSync("dist", { recursive: true });
+fs.writeFileSync("dist/index.html", "install-saw:" + fs.readFileSync("install-saw", "utf8") +
+  " build-saw:" + (process.env.API_TOKEN ? "yes" : "no") + "\n");'
+cat > "$SRC/envinstall/package.json" <<'JSON'
+{ "name": "envinstall", "version": "1.0.0", "private": true,
+  "scripts": { "build": "node build.js", "postinstall": "node -e \"require('fs').writeFileSync('install-saw', process.env.API_TOKEN ? 'yes' : 'no')\"" },
+  "engines": { "node": ">=22" } }
+JSON
+$BUILD $ENVAPP "$SRC/envinstall" --install-scripts >/dev/null 2>&1 || bad "install-script build failed"
+grep -q 'install-saw:no build-saw:yes' <<<"$(get $ENVAPP)" && ok "npm ci (install scripts) saw no secret; npm run build did" \
+  || bad "install step: $(get $ENVAPP)"
+
+# Previews never get the live values; they get their own (--preview) or none.
+$BUILD $ENVAPP "$SRC/envok" --preview try-env >/dev/null 2>&1 && ok "preview built" || bad "preview build failed"
+grep -q 'has-secret:no' <<<"$(get try-env--$ENVAPP)" && grep -q 'url:undefined' <<<"$(get try-env--$ENVAPP)" \
+  && ok "a preview does NOT get the live app's values" || bad "preview got live values: $(get try-env--$ENVAPP)"
+printf '%s' "preview-only-value-$$" | $ENVCLI set $ENVAPP API_TOKEN --preview >/dev/null
+$BUILD $ENVAPP "$SRC/envok" --preview try-env >/dev/null 2>&1
+grep -q "has-secret:yes secret-len:$(printf '%s' "preview-only-value-$$" | wc -c)" <<<"$(get try-env--$ENVAPP)" \
+  && ok "a preview gets its own --preview value" || bad "preview value: $(get try-env--$ENVAPP)"
+
+# A store file that others can read, or a link, is not trusted: the build stops.
+chmod 644 "$MINI_DEPLOY_APP_ENV/$ENVAPP.json"
+expect_error "a world-readable env file" "read by others" $BUILD $ENVAPP "$SRC/envok"
+chmod 600 "$MINI_DEPLOY_APP_ENV/$ENVAPP.json"
+ln -s "$MINI_DEPLOY_APP_ENV/$ENVAPP.json" "$MINI_DEPLOY_APP_ENV/link-$$.json"
+expect_error "an env file that is a link" "env values" $BUILD link-$$ "$SRC/envok"
+# Broken files fail the build clearly (and fast: a FIFO must not hang it).
+printf '{"A": ' > "$MINI_DEPLOY_APP_ENV/badjson-$$.json"; chmod 600 "$MINI_DEPLOY_APP_ENV/badjson-$$.json"
+expect_error "an env file that is not JSON" "not valid JSON" $BUILD badjson-$$ "$SRC/envok"
+python3 -c "import sys; sys.stdout.write('{\"A\": {\"value\": \"' + 'x' * 1100000 + '\", \"public\": true}}')" > "$MINI_DEPLOY_APP_ENV/huge-$$.json"
+chmod 600 "$MINI_DEPLOY_APP_ENV/huge-$$.json"
+expect_error "an env file over 1 MB" "larger than" $BUILD huge-$$ "$SRC/envok"
+python3 -c "print('[' * 100000)" > "$MINI_DEPLOY_APP_ENV/deep-$$.json"; chmod 600 "$MINI_DEPLOY_APP_ENV/deep-$$.json"
+expect_error "deeply nested JSON" "not valid JSON" $BUILD deep-$$ "$SRC/envok"
+mkfifo -m 600 "$MINI_DEPLOY_APP_ENV/fifo-$$.json"
+t0=$(date +%s)
+expect_error "a FIFO at the env path" "not a regular file" timeout 60 $BUILD fifo-$$ "$SRC/envok"
+[ $(( $(date +%s) - t0 )) -lt 30 ] && ok "... and it did not hang" || bad "FIFO took $(( $(date +%s) - t0 ))s"
+chmod 755 "$MINI_DEPLOY_APP_ENV"
+expect_error "a store folder others can read" "read by others" $BUILD $ENVAPP "$SRC/envok"
+chmod 700 "$MINI_DEPLOY_APP_ENV"
+real=$(env -u MINI_DEPLOY_TESTING python3 -c "import sys; sys.path.insert(0, '$REPO/scripts'); import appenv; print(appenv.ENV_ROOT)")
+[ "$real" = /etc/mini-deploy/apps ] && ok "MINI_DEPLOY_APP_ENV alone does not move the real store" || bad "override without the test switch: $real"
+$ENVCLI unset $ENVAPP PUBLIC_URL >/dev/null; listed=$($ENVCLI list $ENVAPP)   # captured first: grep -q + pipefail
+grep -q PUBLIC_URL <<<"$listed" && bad "unset left PUBLIC_URL" || ok "unset removes a value"
+
+python3 - <<PY || fail=1
+import os, subprocess, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "$REPO/scripts")
+import build, buildlog, collections
+bad = 0
+def check(ok, msg):
+    global bad
+    print(("ok    " if ok else "FAIL  ") + msg)
+    bad += not ok
+secret = "Zq7-secret-value-1234567890"
+# a secret cut in two by the 64 KB read limit is still masked
+for pad in (build.CHUNK - 5, build.CHUNK - 1, build.CHUNK, build.CHUNK * 3 - 11):
+    cap, tail = buildlog.Capture(), collections.deque(maxlen=40)
+    p = subprocess.Popen(["python3", "-c", f"import sys; sys.stdout.write('x' * {pad} + '{secret}' + 'y' * 10 + '\\\\n' + '{secret}')"],
+                         stdout=subprocess.PIPE)
+    build.print = lambda *a, **k: None
+    build.pump_output(p.stdout, cap, tail, list(build.all_forms({"K": secret})))
+    del build.print
+    p.wait()
+    text = cap.text()
+    check(secret not in text and text.count("[hidden]") == 2 and text.count("x") == pad,
+          f"secret across the read limit (padding {pad}) is masked, nothing lost")
+# the docker command lines carry names, never values; npm ci gets none at all
+calls = []
+class FakeProc:
+    stdout = open(os.devnull, "rb")
+    def wait(self, timeout=None): return 0
+def fake_popen(cmd, **kw):
+    calls.append((cmd, kw.get("env", {})))
+    return FakeProc()
+real_popen, real_run = build.subprocess.Popen, build.subprocess.run
+build.subprocess.Popen = fake_popen
+build.subprocess.run = lambda *a, **k: None
+os.environ["SOME_HOST_SETTING"] = "host-only"
+build.docker_build(Path("/nonexistent"), "img", False, None, {"API_TOKEN": secret, "MODE": "x"},
+                   list(build.all_forms({"API_TOKEN": secret})))
+build.subprocess.Popen, build.subprocess.run = real_popen, real_run
+(ci_cmd, ci_env), (cmd, env) = calls
+check(len(calls) == 2 and ci_cmd[-1].startswith("npm ci") and cmd[-1] == "npm run build", "two boxes: npm ci, then npm run build")
+check("API_TOKEN" not in ci_cmd and "API_TOKEN" not in ci_env, "the npm ci box gets no app values")
+check(not any(secret in a for c, _ in calls for a in c), "the secret is not on any docker command line")
+check(cmd[cmd.index("API_TOKEN") - 1] == "-e" and "MODE" in cmd, "names are passed as -e KEY")
+check(cmd.index("API_TOKEN") < cmd.index("HOME=/tmp"), "our own HOME comes after the app's values (it wins)")
+check(env.get("API_TOKEN") == secret, "the value travels in the docker client's environment")
+check("SOME_HOST_SETTING" not in env and "PATH" in env, "the docker client gets a small environment, not all of ours")
+
+# encoded forms are found and masked; a short piece is not used (false alarms)
+import base64, json as js, html as ht, urllib.parse as up
+q = 'p"a/s\\\\s<w>&rd-' + "é" * 3 + "-9"
+forms = build.all_forms({"Q": q})
+long_b64 = base64.b64encode(b"Basic user:" + q.encode())
+for label, text in [("JSON (ascii)", js.dumps(q).encode()), ("JSON (utf-8)", js.dumps(q, ensure_ascii=False).encode()),
+                    ("JS with <\\/", js.dumps(q).replace("/", "\\\\/").encode()), ("HTML", ht.escape(q).encode()),
+                    ("URL", up.quote(q, safe="").encode()), ("base64 inside a longer text", long_b64),
+                    ("URL-safe base64", base64.urlsafe_b64encode(b"xy" + q.encode()))]:
+    check(any(f in text for f in forms) and b"[hidden]" in build.mask(text, list(forms)), f"{label} form is caught")
+check(all(len(f) >= build.MIN_FORM for f in forms), "no form shorter than 8 bytes")
+
+# find_secret: file names too, a FIFO does not hang it, a huge dist is refused before reading
+tmp = Path(tempfile.mkdtemp(prefix="mini-deploy-envunit-"))
+(tmp / "a").mkdir(); (tmp / "a" / "ok.txt").write_text("nothing here")
+os.mkfifo(tmp / "a" / "pipe")
+check(build.find_secret(tmp, build.all_forms({"K": secret})) is None, "clean dist passes, a FIFO is skipped (no hang)")
+(tmp / "a" / (secret + ".txt")).write_text("x")
+check(build.find_secret(tmp, build.all_forms({"K": secret})) == "K", "a secret in a file NAME is found")
+big = tmp / "big"; big.mkdir()
+with open(big / "sparse.bin", "wb") as fh:
+    fh.truncate(build.deploy_mod.MAX_RELEASE_BYTES + 1)   # sparse: costs no disk
+t0 = __import__("time").monotonic()
+try:
+    build.find_secret(big, build.all_forms({"K": secret}))
+    check(False, "a dist over the release cap was scanned")
+except build.BuildError as e:
+    took = __import__("time").monotonic() - t0
+    check("larger than" in str(e) and took < 2, f"a dist over 500 MB is refused before reading ({took:.2f}s)")
+
+# the dashboard shows a reason word, never the key name, for the new errors
+import dashboard
+for detail, word in [("env values could not be used; nothing was deployed: GIT_TOKEN is not allowed", "env problem"),
+                     ("o/r abc1234 d (fallback) env values could not be used; nothing was deployed: x", "env problem"),
+                     ("a secret appears in dist/; nothing was deployed: GIT_TOKEN (if it is not secret ...)", "refused: secret in output")]:
+    got = dashboard.public_detail("build", "fail", detail)
+    check(word in got and "GIT_TOKEN" not in got, f"dashboard says {got!r}")
+
+# the webhook does not walk the fallback chain for an env-file problem (it would fail the same)
+import deploy, webhook
+deploy.LOG_FILE = tmp / "deploy.log"   # never the real deploy log
+tried = []
+def fake_run_job(j, allow_file, check_tip=True):
+    tried.append(j["sha"])
+    raise build.EnvBuildError("env values could not be used; nothing was deployed: bad file")
+webhook.run_job = fake_run_job
+class Seen:
+    def remove(self, d): pass
+state = type("S", (), {"seen": Seen()})()
+old = {"repo": "o/r", "sha": "b" * 40, "delivery": "d2", "app": "envtest-unit"}
+new = {"repo": "o/r", "sha": "a" * 40, "delivery": "d1", "app": "envtest-unit", "fallback": old}
+webhook.process(state, new, False)
+check(tried == ["a" * 40], f"an env error stops the fallback chain (tried {len(tried)} push(es))")
 sys.exit(1 if bad else 0)
 PY
 

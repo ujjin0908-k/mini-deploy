@@ -814,6 +814,8 @@ def process(state, job, allow_file):
         except (GitError, build_mod.BuildError, deploy_mod.DeployError) as e:
             deploy_mod.log_event(j["app"], "webhook", None, "fail", started, f"{tag} {e}")
             state.seen.remove(j["delivery"])
+            if getattr(e, "config", False):
+                return  # the app's env file is the problem: an older push would fail the same way
             if getattr(e, "busy", False) and i == 0 and not j.get("retried"):
                 j["retried"] = True
                 # The app was busy for 10 minutes: try once more, unless a newer job for

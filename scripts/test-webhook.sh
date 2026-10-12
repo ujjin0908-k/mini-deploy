@@ -15,6 +15,7 @@ export MINI_DEPLOY_NO_DASHBOARD=1   # keep the real dashboard's releases quiet d
 REPO=/mnt/c/Users/indra/Code/mini-deploy
 DEPLOY="python3 $REPO/scripts/deploy.py"
 SRC=$(mktemp -d /tmp/mini-deploy-hook-test-XXXXXX)
+touch "$SRC/.started"   # "left behind" counts only what THIS run made (a kill -9 test of an earlier run leaves one on purpose)
 ORIGIN=$SRC/origin
 STATE=$SRC/state
 PORT=9101
@@ -556,7 +557,7 @@ PY
 
 echo
 echo "== 12. nothing left behind, secret not leaked =="
-dirs=$(ls -d /var/tmp/mini-deploy-hook-* /var/tmp/mini-deploy-build-* 2>/dev/null | wc -l)
+dirs=$(find /var/tmp -maxdepth 1 \( -name 'mini-deploy-hook-*' -o -name 'mini-deploy-build-*' \) -newer "$SRC/.started" | wc -l)
 [ "$dirs" = 0 ] && ok "no work folders left in /var/tmp" || bad "$dirs work folders left"
 left=$(docker ps -aq --filter "name=mini-deploy-build-" | wc -l)
 [ "$left" = 0 ] && ok "no build containers left" || bad "$left containers left"
