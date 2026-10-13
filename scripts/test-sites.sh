@@ -200,7 +200,8 @@ cat > "$SRC/evil.log" <<'LOG'
 not a log line at all
 2026-10-12T01:00:07Z demo-site webhook - fail 0.2s xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 LOG
-python3 "$REPO/scripts/dashboard.py" --out "$SRC/out" --log-file "$SRC/evil.log" >/dev/null
+mkdir -p "$SRC/sites/demo-site/releases"   # the fixture's app exists in a temp /sites, not the real one
+python3 "$REPO/scripts/dashboard.py" --out "$SRC/out" --log-file "$SRC/evil.log" --sites-root "$SRC/sites" >/dev/null
 SRC_OUT="$SRC/out" python3 - <<'PY' || fail=1
 import json, os, sys
 from pathlib import Path

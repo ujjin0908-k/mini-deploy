@@ -1,0 +1,45 @@
+# mini-deploy Cheaper Inference forwarder (scripts/ci_forwarder.py), for the After Sleep app.
+#
+# Install (as root in WSL; the owner approves each step):
+#   cp /mnt/c/Users/indra/Code/mini-deploy/systemd/mini-deploy-ci.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now mini-deploy-ci
+# Set the upstream address once (kept in /etc/mini-deploy/ci.json, never in git). Typed hidden,
+# so it does not stay in the shell history:
+#   read -rs ADDR; echo "$ADDR" | python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/ci_forwarder.py set-upstream; unset ADDR
+# Use:
+#   systemctl status mini-deploy-ci        is it running?
+#   journalctl -u mini-deploy-ci -n 50     one line per request (method, path, status; never keys)
+
+[Unit]
+Description=mini-deploy Cheaper Inference forwarder (127.0.0.1:9200, behind Caddy /api/ci)
+RequiresMountsFor=/mnt/c/Users/indra/Code/mini-deploy
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/c/Users/indra/Code/mini-deploy
+ExecStart=/usr/bin/python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/ci_forwarder.py serve
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=1
+
+# Sandbox: read-only system, no writes at all (it stores nothing).
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+NoNewPrivileges=yes
+MemoryMax=512M
+TasksMax=256
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

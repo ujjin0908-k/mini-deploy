@@ -74,6 +74,14 @@
     }
 
     handle @app {
+        # Cheaper Inference for the apps (scripts/ci_forwarder.py, 127.0.0.1:9200). This is an
+        # in-Caddy reverse proxy to a loopback service, for this one path only. It is NOT a
+        # Funnel or tailscale serve in front of :8080 (that rule still holds). The forwarder
+        # allowlists the paths and adds nothing: the phone's own key travels in the request.
+        handle /api/ci/* {
+            reverse_proxy 127.0.0.1:9200
+        }
+
         # Never serve dotfiles or dot-folders (.env, .git/, .npmrc), at any depth.
         # (file_server's `hide` only matches the last path segment, so use a path match.)
         @dotfile path_regexp (^|/)\.
