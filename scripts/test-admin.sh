@@ -394,6 +394,151 @@ sys.exit(1 if bad_count else 0)
 PY
 
 echo
+echo "== 1b. GitHub repos from the admin page (temp database and token file) =="
+python3 - <<'PY' || fail=1
+import io, json, os, re, sqlite3, sys, tempfile, threading, http.client
+from pathlib import Path
+
+tmp = Path(tempfile.mkdtemp(prefix="mini-deploy-admintest-repos-"))   # removed by hand, like the others
+os.environ["MINI_DEPLOY_TESTING"] = "1"
+os.environ["MINI_DEPLOY_ADMIN_DB"] = str(tmp / "admin.db")
+os.environ["MINI_DEPLOY_TOKEN_FILE"] = str(tmp / "github-token")
+sys.path.insert(0, "/mnt/c/Users/indra/Code/mini-deploy/scripts")
+import deploy, admin, repos
+deploy.SITES = tmp / "sites"; deploy.SITES.mkdir()
+deploy.LOG_FILE = tmp / "deploy.log"
+admin.HOME_FILE = tmp / "home-lan"
+
+PORT = 9311
+class TestServer(admin.Server):
+    deadline = 5
+srv = TestServer(("127.0.0.1", PORT), admin.Handler)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+HOST, ORIGIN = admin.HOST, admin.ORIGIN
+journal = io.StringIO()
+admin.print = lambda *a, **k: journal.write(" ".join(str(x) for x in a) + "\n")
+deploy.print = lambda *a, **k: None
+
+bad_count = 0
+def check(ok, msg):
+    global bad_count
+    print(("ok    " if ok else "FAIL  ") + msg)
+    bad_count += not ok
+
+def req(method, path, body=None, cookie=None, csrf=None, origin=ORIGIN, ctype="application/json"):
+    h = {"Host": HOST}
+    if origin: h["Origin"] = origin
+    data = None
+    if body is not None:
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        h["Content-Type"] = ctype
+    if cookie: h["Cookie"] = f"{admin.COOKIE}={cookie}"
+    if csrf: h["X-CSRF-Token"] = csrf
+    c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=60)
+    c.request(method, path, body=data, headers=h)
+    r = c.getresponse(); b = r.read(); c.close()
+    return r.status, b, r
+
+def jbody(b):
+    try: return json.loads(b)
+    except ValueError: return {}
+
+PW = "correct horse battery staple 42"
+admin.set_password(PW)
+st, b, r = req("POST", "/api/login", {"password": PW})
+csrf = jbody(b).get("csrf")
+sc = r.getheader("Set-Cookie") or ""
+cookie = sc.split(";")[0].split("=", 1)[1] if sc.startswith(admin.COOKIE + "=") else None
+check(st == 200 and bool(cookie) and bool(csrf), "signed in (session cookie and CSRF token)")
+
+CONNECT = "/api/repos/connect"
+SITE = {"repo": "owner/site", "app": "adm-repo", "kind": "static", "subdir": "site"}
+st, b, _ = req("POST", CONNECT, SITE)
+check(st == 401, "connect without a session: 401")
+st, b, _ = req("POST", CONNECT, SITE, cookie=cookie)
+check(st == 403, "connect without the CSRF token: 403")
+st, b, _ = req("POST", CONNECT, SITE, cookie=cookie, csrf=csrf, origin="http://evil.localhost:8080")
+check(st == 403, "connect from another app's page (wrong Origin): 403")
+st, b, _ = req("POST", CONNECT, b"repo=owner%2Fsite", cookie=cookie, csrf=csrf, ctype="application/x-www-form-urlencoded")
+check(st == 415, "a form post is refused (JSON only)")
+
+st, b, _ = req("POST", CONNECT, SITE, cookie=cookie, csrf=csrf)
+made = jbody(b)
+secret, hook_id = made.get("secret", ""), made.get("hook_id", "")
+check(st == 200 and re.fullmatch(r"[0-9a-f]{32}", hook_id) is not None and re.fullmatch(r"[0-9a-f]{64}", secret) is not None,
+      "connect: an address and a 64-hex secret, in the answer to this request")
+st, b, _ = req("POST", CONNECT, {"repo": "owner/site", "app": "adm-other", "kind": "static", "subdir": "site"}, cookie=cookie, csrf=csrf)
+check(st == 400 and "already" in jbody(b).get("error", ""), "the same repo twice: refused")
+st, b, _ = req("POST", CONNECT, {"repo": "OWNER/Site", "app": "adm-other", "kind": "static", "subdir": "site"}, cookie=cookie, csrf=csrf)
+check(st == 400 and "already" in jbody(b).get("error", ""), "the same repo in other letter case: refused")
+st, b, _ = req("POST", CONNECT, {"repo": "owner/whole", "app": "adm-whole", "kind": "static"}, cookie=cookie, csrf=csrf)
+check(st == 400 and "sub-folder" in jbody(b).get("error", ""), "static without a sub-folder (would publish the whole repo): refused")
+(deploy.SITES / "adm-taken" / "releases").mkdir(parents=True)
+st, b, _ = req("POST", CONNECT, {"repo": "owner/taken", "app": "adm-taken", "kind": "static", "subdir": "s"}, cookie=cookie, csrf=csrf)
+check(st == 200 and jbody(b).get("replaces_existing") is True, "an app that already exists: connected, and the answer says the first push replaces it")
+req("POST", "/api/repos/disconnect", {"repo": "owner/taken"}, cookie=cookie, csrf=csrf)
+BAD = [("reserved app name", {"repo": "owner/x", "app": "admin", "kind": "static"}),
+       ("bad repo name", {"repo": "../etc", "app": "adm-x", "kind": "static"}),
+       ("unknown kind", {"repo": "owner/y", "app": "adm-y", "kind": "exec"}),
+       ("bad branch", {"repo": "owner/z", "app": "adm-z", "kind": "static", "branch": "a..b"}),
+       ("sub-folder with ..", {"repo": "owner/w", "app": "adm-w", "kind": "static", "subdir": "../x"}),
+       ("previews on a name too long for them", {"repo": "owner/v", "app": "a" * 40, "kind": "build", "previews": True})]
+for label, payload in BAD:
+    st, b, _ = req("POST", CONNECT, payload, cookie=cookie, csrf=csrf)
+    check(st == 400, f"refused: {label}")
+
+st, b, _ = req("GET", "/api/state", cookie=cookie)
+check(st == 200 and secret.encode() not in b and hook_id.encode() in b,
+      "the page state lists the repo with its address, never the secret")
+
+st, b, _ = req("POST", "/api/repos/rotate", {"repo": "owner/site"}, cookie=cookie, csrf=csrf)
+rot = jbody(b)
+check(st == 200 and re.fullmatch(r"[0-9a-f]{64}", rot.get("secret", "")) is not None
+      and rot["secret"] != secret and rot.get("hook_id") == hook_id,
+      "rotate: a new secret, the same address, only in this answer")
+st, b, _ = req("POST", "/api/repos/disconnect", {"repo": "owner/site"}, cookie=cookie, csrf=csrf)
+check(st == 200, "disconnect")
+st, b, _ = req("POST", "/api/repos/disconnect", {"repo": "owner/site"}, cookie=cookie, csrf=csrf)
+check(st == 400, "disconnect twice: refused")
+
+TOKEN = "github_pat_TESTONLY" + "x" * 24     # test value only
+st, b, _ = req("POST", "/api/token", {"token": "not-a-token"}, cookie=cookie, csrf=csrf)
+check(st == 400 and b"not-a-token" not in b, "a bad token is refused and not echoed")
+st, b, _ = req("POST", "/api/token", {"token": TOKEN}, cookie=cookie, csrf=csrf)
+check(st == 500 and TOKEN.encode() not in b, "no token file yet: a clear error, the token not echoed")
+os.mkfifo(tmp / "github-token")
+st, b, _ = req("POST", "/api/token", {"token": TOKEN}, cookie=cookie, csrf=csrf)
+check(st == 500, "a FIFO at the token path: refused at once, the request does not hang")
+os.unlink(tmp / "github-token")
+(tmp / "github-token").write_text("")
+os.chmod(tmp / "github-token", 0o644)
+(tmp / "github-token").write_text("github_pat_OLDVALUE" + "y" * 24 + "\n")
+st, b, _ = req("POST", "/api/token", {"token": TOKEN}, cookie=cookie, csrf=csrf)
+check(st == 500 and "OLDVALUE" in (tmp / "github-token").read_text(),
+      "a token file others can read: refused, and the old content is not emptied first")
+(tmp / "github-token").write_text("")
+os.chmod(tmp / "github-token", 0o600)
+st, b, _ = req("POST", "/api/token", {"token": TOKEN}, cookie=cookie, csrf=csrf)
+check(st == 200 and TOKEN.encode() not in b and jbody(b).get("token") == "set",
+      "token saved; the answer says 'set' and never shows it")
+check((tmp / "github-token").read_text().strip() == TOKEN, "the token is in its own file")
+st, b, _ = req("GET", "/api/state", cookie=cookie)
+check(jbody(b).get("token") == "set" and TOKEN.encode() not in b, "state says the token is set, without the value")
+
+con = sqlite3.connect(admin.DB_PATH)
+audit_text = " ".join(str(x) for row in con.execute("SELECT action, app, result FROM audit") for x in row)
+con.close()
+check(all(a in audit_text for a in ("connect", "rotate-secret", "disconnect", "set-token")),
+      "every change is in the audit log")
+seen = audit_text + journal.getvalue()
+check(secret not in seen and rot["secret"] not in seen and TOKEN not in seen,
+      "no secret or token in the audit log or the server's journal lines")
+
+srv.shutdown()
+sys.exit(1 if bad_count else 0)
+PY
+
+echo
 echo "== 2. Caddy's gate in front of the real service =="
 systemctl is-active --quiet mini-deploy-admin && ok "mini-deploy-admin is running" || bad "mini-deploy-admin is not running"
 code() { curl -s -o /dev/null -w "%{http_code}" -m 5 "$@"; }

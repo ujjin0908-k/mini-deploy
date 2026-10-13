@@ -1,6 +1,7 @@
 {
   "listen": "127.0.0.1",
   "port": 9000,
+  "public_base": "https://mini-deploy.tail206989.ts.net",
   "repos": {
   }
 }

@@ -47,6 +47,63 @@
       <div id="apps" class="grid"></div>
     </section>
 
+    <section id="github" aria-labelledby="github-title" class="glass stack">
+      <h2 id="github-title">GitHub</h2>
+      <p class="muted small">
+        Connect a repo and every push to its branch goes live here. Each repo gets its own webhook
+        address and secret. Private repos also need the token below (read-only).
+      </p>
+
+      <div class="stack">
+        <h3>Token for private repos</h3>
+        <p id="token-status" class="muted small"></p>
+        <form id="token-form" class="stack" autocomplete="off">
+          <label for="token">Fine-grained token: read-only "Contents", only the repos you pick</label>
+          <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required>
+          <button class="pill" type="submit">Save token</button>
+        </form>
+      </div>
+
+      <div class="stack">
+        <h3>Connect a repo</h3>
+        <form id="connect-form" class="stack" autocomplete="off">
+          <label for="c-repo">Repo (owner/name)</label>
+          <input id="c-repo" name="repo" required spellcheck="false">
+          <label for="c-app">App name on this PC (a-z, 0-9, -)</label>
+          <input id="c-app" name="app" required spellcheck="false">
+          <label for="c-branch">Branch</label>
+          <input id="c-branch" name="branch" value="main" spellcheck="false">
+          <label for="c-subdir">Sub-folder (for static: required, the folder with index.html; for build: empty = the repo's root)</label>
+          <input id="c-subdir" name="subdir" spellcheck="false">
+          <label for="c-kind">Kind</label>
+          <select id="c-kind" name="kind">
+            <option value="build">build (npm, inside Docker)</option>
+            <option value="static">static (no build: the folder is the site)</option>
+          </select>
+          <label><input id="c-previews" name="previews" type="checkbox"> Build other branches as previews</label>
+          <button class="pill pill-dark" type="submit">Connect</button>
+        </form>
+      </div>
+
+      <div class="stack">
+        <h3>Connected repos</h3>
+        <div id="repos"></div>
+      </div>
+
+      <div id="secret-box" class="dark-card stack" hidden>
+        <h3>Add this webhook on GitHub (shown once)</h3>
+        <ol>
+          <li>On the repo: Settings, then Webhooks, then Add webhook.</li>
+          <li>Payload URL: <code id="sb-url" class="mono"></code></li>
+          <li>Content type: application/json.</li>
+          <li>Secret: <code id="sb-secret" class="mono"></code></li>
+          <li>Which events: just the push event.</li>
+        </ol>
+        <p class="muted small">Copy both now. This page will not show the secret again.</p>
+        <button id="sb-done" class="pill" type="button">I have copied it</button>
+      </div>
+    </section>
+
     <section aria-labelledby="log-title" class="dark-card">
       <h2 id="log-title">Recent deploys</h2>
       <div id="log"></div>

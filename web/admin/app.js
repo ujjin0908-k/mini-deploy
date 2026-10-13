@@ -238,11 +238,104 @@
     });
   }
 
+  // ---------------------------------------------------------------- GitHub repos (P3b)
+  // The secret is shown once, in its own box, and is never kept by a refresh. The list
+  // redraws every 30 s, so the box lives outside it.
+  var HOOK_ID_RE = /^[0-9a-f]{32}$/;
+  var REPO_RE = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_-][A-Za-z0-9_.-]{0,99}$/;   // the server checks again
+  var hookBase = null;
+
+  function showSecret(hookId, secret, base) {
+    if (!HOOK_ID_RE.test(hookId) || typeof secret !== "string") { return; }
+    hookBase = typeof base === "string" && /^https:\/\//.test(base) ? base : hookBase;
+    $("sb-url").textContent = (hookBase || "") + "/webhook/" + hookId;
+    $("sb-secret").textContent = secret;
+    $("secret-box").hidden = false;
+  }
+  $("sb-done").addEventListener("click", function () {
+    $("sb-secret").textContent = "";
+    $("sb-url").textContent = "";
+    $("secret-box").hidden = true;
+  });
+
+  // One request that may answer with a new secret (connect, rotate) or nothing (token, disconnect).
+  function gitAction(path, body, okText) {
+    api("POST", path, body).then(function (res) {
+      if (res.status === 401) { showLogin(true); say("please sign in again", true); return; }
+      if (res.status !== 200) { say(res.data.error || ("failed (" + res.status + ")"), true); return; }
+      say(res.data.replaces_existing === true
+        ? okText + ". Note: an app with this name already exists; the first push replaces what is live (Roll back still works)."
+        : okText);
+      if (res.data.secret) { showSecret(res.data.hook_id, res.data.secret, res.data.hook_base); }
+      load();
+    }, function () { say("could not reach the admin service", true); });
+  }
+
+  function rotateRepo(repo) {
+    if (!window.confirm("Make a new secret for " + repo + "? The old one stops working at once; update GitHub's webhook.")) { return; }
+    gitAction("/api/repos/rotate", { repo: repo }, "new secret for " + repo + " (shown above, once)");
+  }
+  function disconnectRepo(repo) {
+    if (!window.confirm("Disconnect " + repo + "? Its pushes are refused from now on, and pushes still waiting are dropped. " +
+        "The app and its previews stay on this PC (remove previews with deploy.py remove).")) { return; }
+    gitAction("/api/repos/disconnect", { repo: repo }, "disconnected " + repo);
+  }
+
+  $("token-form").addEventListener("submit", function (event) {
+    event.preventDefault();   // JSON only, never a form post
+    var field = $("token");
+    var token = field.value;
+    field.value = "";
+    gitAction("/api/token", { token: token }, "token saved");
+  });
+
+  $("connect-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    var body = {
+      repo: $("c-repo").value.trim(),
+      app: $("c-app").value.trim(),
+      branch: $("c-branch").value.trim() || "main",
+      subdir: $("c-subdir").value.trim(),
+      kind: $("c-kind").value,
+      previews: $("c-previews").checked
+    };
+    if (!REPO_RE.test(body.repo)) { say("the repo must look like owner/name", true); return; }
+    if (!NAME_RE.test(body.app)) { say("the app name may use only a-z, 0-9 and '-' (1 to 40 characters)", true); return; }
+    gitAction("/api/repos/connect", body, "connected " + body.repo + ": its address and secret are shown above, once");
+  });
+
+  function renderGithub(data) {
+    hookBase = typeof data.hook_base === "string" ? data.hook_base : null;
+    $("token-status").textContent = "Token: " + (data.token || "unknown");
+    var list = $("repos");
+    list.textContent = "";
+    var repos = data.repos || [];
+    if (!repos.length) { list.appendChild(el("p", "muted empty", "No repos connected yet.")); }
+    repos.forEach(function (r) {
+      var row = el("div", "audit-row stack");
+      row.appendChild(el("span", "mono", r.repo + " → " + r.app));
+      row.appendChild(el("p", "muted small", r.branch + " · " + (r.subdir || "root") + " · " + r.kind +
+        (r.previews ? " · previews on" : "")));
+      var actions = el("div", "actions");
+      var rot = el("button", "pill", "New secret");
+      rot.type = "button";
+      rot.addEventListener("click", function () { rotateRepo(r.repo); });
+      var dis = el("button", "pill", "Disconnect");
+      dis.type = "button";
+      dis.addEventListener("click", function () { disconnectRepo(r.repo); });
+      actions.appendChild(rot);
+      actions.appendChild(dis);
+      row.appendChild(actions);
+      list.appendChild(row);
+    });
+  }
+
   function load() {
     api("GET", "/api/state").then(function (res) {
       if (res.status === 401) { showLogin(true); return; }
       if (res.status !== 200) { say("could not load (" + res.status + ")", true); return; }
       render(res.data);
+      renderGithub(res.data);
     }, function () { say("could not reach the admin service", true); });
   }
 

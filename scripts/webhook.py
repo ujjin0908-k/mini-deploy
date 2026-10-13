@@ -32,6 +32,7 @@ import secrets
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -45,6 +46,8 @@ REPO_ROOT = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 import build as build_mod    # noqa: E402  (Docker build, then deploy)
 import deploy as deploy_mod  # noqa: E402  (log_event, APP_RE, hold)
+import repos as repos_mod    # noqa: E402  (repos connected from the admin page, and the token)
+from repos import safe_branch  # noqa: E402  (the same rule for every branch name)
 
 ENV_FILE = Path("/etc/mini-deploy/env")        # secret lives in the WSL filesystem, mode 0600
 STATE_DIR = Path("/var/lib/mini-deploy")       # delivery ids and queued jobs survive a restart
@@ -57,7 +60,7 @@ TOTAL_DEADLINE = 10
 MAX_HANDLERS = 16               # concurrent requests; more get a 503 instead of a thread
 MIN_SECRET = 32                 # characters
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-REPO_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}$")
+REPO_RE = repos_mod.REPO_RE   # one rule for repo names: the config file and the admin page
 BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
 SUBDIR_RE = re.compile(r"^[A-Za-z0-9._/-]{0,200}$")
 DELIVERY_RE = re.compile(r"^[0-9A-Fa-f-]{36}$")  # GitHub's X-GitHub-Delivery GUID
@@ -85,13 +88,27 @@ class GitError(Exception):
 
 # ---------------------------------------------------------------- config and secret
 
-def safe_branch(branch):
-    """A branch name we are willing to hand to git: a strict subset of what git allows.
-    No '..', no leading '-' (could read as an option), no '//', no '.lock' ending."""
-    return (isinstance(branch, str) and BRANCH_RE.fullmatch(branch) is not None
-            and ".." not in branch and "//" not in branch
-            and not branch.startswith(("-", "/", ".")) and not branch.endswith(("/", ".", ".lock"))
-            and "/." not in branch)
+class RepoDBError(Exception):
+    """The admin database (the connected repos) could not be read: locked, damaged or unsafe.
+    Never the same as "not connected": callers keep or refuse the push, they do not drop it."""
+
+
+def db_lookup(fn, arg):
+    try:
+        return fn(arg)
+    except (sqlite3.Error, RuntimeError, OSError) as e:
+        raise RepoDBError(type(e).__name__)
+
+
+def find_repo(state, full_name):
+    """The config file's repo (tests, and the old list), else a repo connected from the admin page.
+    Raises RepoDBError when the database cannot answer."""
+    if not isinstance(full_name, str):
+        return None
+    cfg = state.config["repos"].get(full_name)
+    if cfg is not None:
+        return cfg
+    return db_lookup(repos_mod.repo_by_name, full_name)
 
 
 def load_config(path, allow_file_urls=False):
@@ -376,7 +393,7 @@ def make_job(cfg, repo, sha, delivery, branch=None, action="build"):
     app = cfg["app"] if branch is None else deploy_mod.preview_name(cfg["app"], branch)
     return {"app": app, "repo": repo, "sha": sha, "url": cfg["url"], "branch": branch or cfg["branch"],
             "subdir": cfg["subdir"], "delivery": delivery, "fallback": None, "retried": False,
-            "action": action}
+            "action": action, "kind": cfg.get("kind", "build"), "private": bool(cfg.get("private"))}
 
 
 def write_pending(state_dir, jobs):
@@ -418,7 +435,7 @@ def load_pending(state):
         if not isinstance(raw, dict):
             return None
         repo, sha = raw.get("repo"), raw.get("sha")
-        cfg = state.config["repos"].get(repo) if isinstance(repo, str) else None
+        cfg = find_repo(state, repo)
         if cfg is None or not isinstance(sha, str) or not SHA_RE.fullmatch(sha):
             return None
         delivery = raw.get("delivery") if isinstance(raw.get("delivery"), str) else NO_DELIVERY
@@ -453,18 +470,29 @@ def load_pending(state):
         except OSError:
             pass
         return 0
-    count = 0
+    count, undecided = 0, []
     for raw in items[:MAX_RESTORED_JOBS]:
         try:
             job = revive(raw)
             if job:
                 state.jobs.submit(job)
                 count += 1
+        except RepoDBError:
+            undecided.append(raw)   # not refused: the repo list could not be read right now
         except Exception:  # noqa: BLE001  (one bad entry must not drop the others)
             continue
+    if undecided:
+        # Keep them where the owner can see them; never drop a push because the database was busy.
+        try:
+            (state.state_dir / "pending.bad").write_text(json.dumps(undecided), encoding="utf-8")
+        except OSError:
+            pass
+        msg = f"{len(undecided)} queued push(es) not restored: repo database unavailable; kept in pending.bad"
+        print(f"warning: {msg}", file=sys.stderr)
+        deploy_mod.log_event("webhook", "webhook", None, "kept", time.monotonic(), msg)
     # Each restored job already rewrote pending.json (the queue saves itself), so the file
-    # was never missing in between. With nothing restored, it can go.
-    if count == 0:
+    # was never missing in between. With nothing restored, and nothing undecided, it can go.
+    if count == 0 and not undecided:
         write_pending(state.state_dir, [])
     return count
 
@@ -495,7 +523,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         state = self.server.state
-        if self.path != "/webhook":
+        # /webhook: the config file's repos (one shared secret). /webhook/<hook_id>: one repo
+        # connected from the admin page, with its own secret. The address alone says which
+        # secret to check, so the signature is checked before any body is parsed.
+        hook_id = None
+        if self.path.startswith("/webhook/"):
+            hook_id = self.path[len("/webhook/"):]
+            if not repos_mod.HOOK_RE.fullmatch(hook_id):
+                return self._reply(404, "not found")
+        elif self.path != "/webhook":
             return self._reply(404, "not found")
 
         # 1. Size, before reading anything. Chunked bodies are not accepted.
@@ -512,8 +548,19 @@ class Handler(BaseHTTPRequestHandler):
         if len(body) != int(length):
             return self._reply(400, "bad request")
 
-        # 3. The signature. Same bare answer for every failure, so there is nothing to probe.
-        if not verify_signature(state.secret, body, self.headers.get("X-Hub-Signature-256")):
+        # 3. The signature. Same bare answer for every failure (an unknown address too), so
+        # there is nothing to probe. An address for a connected repo uses that repo's secret.
+        row = None
+        if hook_id is None:
+            key = state.secret
+        else:
+            try:
+                row = db_lookup(repos_mod.repo_by_hook, hook_id)
+            except RepoDBError as e:   # an answer, and a line saying why (GitHub can redeliver)
+                state.log_reject(f"repo database unavailable ({e})")
+                return self._reply(503, "unavailable")
+            key = row["secret"].encode() if row else b""
+        if not key or not verify_signature(key, body, self.headers.get("X-Hub-Signature-256")):
             state.log_reject("bad or missing signature")
             return self._reply(401, "unauthorized")
 
@@ -550,7 +597,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(400, "bad payload")
 
         # 5. Is this push one we act on? The answer comes from our config only.
-        cfg = state.config["repos"].get(repo)
+        if row is not None:
+            if repo.lower() != row["full"].lower():   # this address is for another repo
+                state.log_reject("signed push for a different repo than its address")
+                return self._reply(400, "bad payload")
+            cfg = row
+        else:
+            cfg = state.config["repos"].get(repo)
         if cfg is None:
             state.seen.add(delivery)
             state.log("ignored", f"{repo} is not in the allowlist {delivery}")
@@ -635,10 +688,11 @@ class Server(ThreadingHTTPServer):
 
 # ---------------------------------------------------------------- git, with limits
 
-def git(args, cwd=None, allow_file=False):
+def git(args, cwd=None, allow_file=False, token=None):
     """Run git with no prompts, no hooks, no user/system config, and only https
     (or file:// for tests). Arguments are a list; there is no shell. On a timeout the
-    whole process group is killed, so git-remote-https cannot linger. Returns stdout."""
+    whole process group is killed, so git-remote-https cannot linger. Returns stdout.
+    token: a private repo's GitHub token, sent as a header through the environment only."""
     cmd = ["git", "-c", "core.hooksPath=/dev/null", "-c", "protocol.allow=never",
            "-c", "protocol.https.allow=always"]
     if allow_file:
@@ -646,6 +700,12 @@ def git(args, cwd=None, allow_file=False):
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": "/nonexistent",
            "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "/bin/false",
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null", "LC_ALL": "C"}
+    hidden = []
+    if token:
+        auth_env, hidden = repos_mod.git_auth(token)
+        env.update(auth_env)
+        # The header is for github.com only: never follow a redirect elsewhere with it.
+        cmd += ["-c", "http.followRedirects=false"]
     proc = subprocess.Popen(cmd + args, cwd=cwd, env=env, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
@@ -658,6 +718,8 @@ def git(args, cwd=None, allow_file=False):
         proc.communicate()
         raise GitError(f"git timed out after {GIT_TIMEOUT}s")
     if proc.returncode != 0:
+        for secret_text in hidden:   # the token must never reach the log, even inside git's words
+            err = err.replace(secret_text, "[hidden]")
         raise GitError(f"git failed: {err.strip()[:200]}")
     return out
 
@@ -727,12 +789,24 @@ def write_deployed(app_root, sha, release):
     os.replace(tmp, app_root / ".deployed")
 
 
+def job_token(job):
+    """The GitHub token for a private repo, read when needed (never stored in a job or a log).
+    An unusable token file is a GitError: logged as a failed push, Redeliver still works."""
+    if not job.get("private"):
+        return None
+    try:
+        return repos_mod.read_token()
+    except (RuntimeError, OSError):
+        raise GitError(f"the GitHub token file {repos_mod.TOKEN_FILE} is not usable (must be root's, mode 600)")
+
+
 def remote_tip(job, allow_file):
     """The commit at exactly refs/heads/<branch> on the remote, or "" if there is none.
     ls-remote matches its pattern against the END of each ref, so refs/heads/x/refs/heads/foo
     would also match "foo": only the line naming exactly our ref counts."""
     want = f"refs/heads/{job['branch']}"
-    out = with_retry(lambda: git(["ls-remote", "--", job["url"], want], allow_file=allow_file))
+    out = with_retry(lambda: git(["ls-remote", "--", job["url"], want], allow_file=allow_file,
+                                 token=job_token(job)))
     for line in out.splitlines():
         parts = line.split()
         if len(parts) == 2 and parts[1] == want and SHA_RE.fullmatch(parts[0]):
@@ -780,7 +854,7 @@ def run_job(job, allow_file, check_tip=True):
         # Fetch the commit named in the push, not "whatever main is now".
         with_retry(lambda: git(["-c", "fetch.fsckObjects=true", "fetch", "-q", "--depth", "1",
                                 "--no-tags", "--no-recurse-submodules", "--", job["url"], job["sha"]],
-                               cwd=src, allow_file=allow_file))
+                               cwd=src, allow_file=allow_file, token=job_token(job)))
         git(["-c", "advice.detachedHead=false", "checkout", "-q", "--detach", "FETCH_HEAD"],
             cwd=src, allow_file=allow_file)
         check_checkout_size(src)
@@ -790,7 +864,18 @@ def run_job(job, allow_file, check_tip=True):
         try:
             # refuse_if_held: the hold is checked again under the deploy lock, just before
             # going live, so a rollback made while this was building is never undone.
-            release = build_mod.build_and_deploy(job["app"], build_dir, commit=job["sha"], refuse_if_held=True)
+            if job.get("kind", "build") == "static":
+                # Static: no build. The checkout's folder is the site, so git's own data goes
+                # first; deploy.py still refuses links, .env, .npmrc and anything too big.
+                shutil.rmtree(src / ".git", ignore_errors=True)
+                # Like an empty dist/ in a build: a folder without index.html would take a
+                # working site down (404 at /). Refused; the live release stays.
+                if not (build_dir / "index.html").is_file():
+                    raise deploy_mod.DeployError(f"no index.html in '{job['subdir']}'; nothing was deployed")
+                release = deploy_mod.deploy(job["app"], build_dir, refuse_if_held=True)
+            else:
+                release = build_mod.build_and_deploy(job["app"], build_dir, commit=job["sha"],
+                                                     refuse_if_held=True)
         except deploy_mod.HeldError:
             return "held", None
     finally:
@@ -807,6 +892,20 @@ def run_job(job, allow_file, check_tip=True):
 def process(state, job, allow_file):
     """Build the job; if that fails, try the push it superseded (a good older push
     must not be lost because a newer one was broken)."""
+    if job.get("private"):
+        # A repo connected from the admin page: still connected, to the same app? A job that
+        # waited while the owner pressed Disconnect (or reconnected it elsewhere) does nothing.
+        started = time.monotonic()
+        tag = f"{job['repo']} {job['sha'][:7]} {job['delivery']}"
+        try:
+            row = find_repo(state, job["repo"])
+        except RepoDBError as e:
+            deploy_mod.log_event(job["app"], "webhook", None, "fail", started, f"{tag} repo database unavailable ({e})")
+            state.seen.remove(job["delivery"])   # GitHub's Redeliver may try again
+            return
+        if row is None or row["app"] not in (job["app"], deploy_mod.preview_parent(job["app"])):
+            deploy_mod.log_event(job["app"], "webhook", None, "disconnected", started, tag)
+            return
     chain, node = [], job
     while node is not None:
         chain.append(node)

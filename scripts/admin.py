@@ -30,7 +30,6 @@ import re
 import secrets
 import socket
 import sqlite3
-import stat
 import sys
 import threading
 import time
@@ -41,16 +40,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deploy as deploy_mod        # rollback, rollforward, unhold: the same code as the command line
 import dashboard as dashboard_mod  # the app list and recent activity
+import repos as repos_mod          # GitHub repos connected from this page, and the token
+from admindb import DB_PATH, audit, db  # the database file (shared with the webhook)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = REPO_ROOT / "web" / "admin"
 LISTEN = ("127.0.0.1", 9300)
 HOST = "admin.localhost:8080"
 ORIGIN = "http://" + HOST
-DB_PATH = Path("/var/lib/mini-deploy/admin.db")
-# Tests use a temp database. The override needs a second switch, like the other stores.
-if os.environ.get("MINI_DEPLOY_ADMIN_DB") and os.environ.get("MINI_DEPLOY_TESTING") == "1":
-    DB_PATH = Path(os.environ["MINI_DEPLOY_ADMIN_DB"])
 HOME_FILE = Path("/etc/mini-deploy/home-lan")
 
 # __Host-: the browser only accepts it with Secure, Path=/ and no Domain, so no other name
@@ -80,44 +77,12 @@ STATIC = {
     "/admin.css": ("admin.css", "text/css; charset=utf-8"),
 }
 ACTIONS = ("rollback", "rollforward", "unhold")
+REPO_ROUTES = ("/api/repos/connect", "/api/repos/rotate", "/api/repos/disconnect", "/api/token")
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, csrf TEXT NOT NULL,
-                                     created REAL NOT NULL, last_seen REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS failures (ts REAL NOT NULL);
-CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, action TEXT NOT NULL,
-                                  app TEXT NOT NULL, result TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS logins (id INTEGER PRIMARY KEY, ts TEXT NOT NULL, result TEXT NOT NULL);
-"""
 
-
-# ---------------------------------------------------------------- database
-
-def _private(st, what, folder=False):
-    kind = stat.S_ISDIR if folder else stat.S_ISREG
-    if not kind(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
-        raise RuntimeError(f"{what} is not a private {'folder' if folder else 'file'} of this user; not used")
-
-
-@contextlib.contextmanager
-def db():
-    """A connection to the admin database, created owner-only on first use. The folder and
-    the file are checked on every use (one someone else owns or can read is never trusted)."""
-    DB_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    _private(os.lstat(DB_PATH.parent), DB_PATH.parent, folder=True)
-    with contextlib.suppress(FileExistsError):
-        os.close(os.open(DB_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
-    _private(os.lstat(DB_PATH), DB_PATH)
-    conn = sqlite3.connect(DB_PATH, timeout=10, isolation_level=None)
-    try:
-        conn.executescript(SCHEMA)
-        yield conn
-    finally:
-        conn.close()
-
+# ---------------------------------------------------------------- helpers
 
 def _sha(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -125,14 +90,6 @@ def _sha(text):
 
 def _now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def audit(conn, action, app, result):
-    """One line per change. Never a value: only fixed words and a checked app name.
-    Sign-ins go to their own table, so a flood of guesses can never push changes out."""
-    conn.execute("INSERT INTO audit (ts, action, app, result) VALUES (?, ?, ?, ?)",
-                 (_now_iso(), action, app if deploy_mod.APP_RE.fullmatch(app) else "-", result))
-    conn.execute("DELETE FROM audit WHERE id <= (SELECT MAX(id) FROM audit) - 1000")
 
 
 def log_login(conn, result):
@@ -237,6 +194,11 @@ def state():
         rows = conn.execute("SELECT ts, action, app, result FROM audit ORDER BY id DESC LIMIT 50").fetchall()
     data["audit"] = [{"ts": r[0], "action": r[1], "app": r[2], "result": r[3]} for r in rows]
     data["at_home"] = base is not None
+    # Connected repos (never a secret) and where the webhook address starts (P3b).
+    with db() as conn:
+        data["repos"] = repos_mod.list_repos(conn)
+    data["hook_base"] = repos_mod.hook_base()
+    data["token"] = repos_mod.token_status()   # "set" / "not set" / "check the file": never the value
     return data
 
 
@@ -346,7 +308,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self._path()
         if not self._host_ok() or path is None:
             return self._not_found()
-        if path not in ("/api/login", "/api/logout", "/api/logout-all", "/api/action"):
+        if path not in ("/api/login", "/api/logout", "/api/logout-all", "/api/action") + REPO_ROUTES:
             return self._not_found()
         # Only this page may send changes: exactly our Origin, a same-origin fetch, JSON.
         if self.headers.get("Origin") != ORIGIN:
@@ -382,7 +344,39 @@ class Handler(BaseHTTPRequestHandler):
                 conn.execute("DELETE FROM sessions")
                 audit(conn, "logout-all", "-", "ok")
                 return self._json(200, {"ok": True}, [("Set-Cookie", self._cookie("", 0))])
+            if path in REPO_ROUTES:
+                return self._repo_action(conn, path, raw)
         return self._action(raw)
+
+    def _repo_action(self, conn, path, raw):
+        """Connect, rotate or disconnect a repo, or set the GitHub token. Replies carry a new
+        secret only in the answer to the request that made it; a token is never sent back."""
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except (ValueError, RecursionError):
+            return self._json(400, {"error": "bad JSON"})
+        if not isinstance(data, dict):
+            return self._json(400, {"error": "bad request"})
+        try:
+            if path == "/api/token":
+                repos_mod.set_token(data.get("token"))
+                audit(conn, "set-token", "-", "ok")
+                return self._json(200, {"ok": True, "token": repos_mod.token_status()})
+            if path == "/api/repos/connect":
+                made = repos_mod.connect(conn, data.get("repo"), data.get("app"),
+                                         branch=data.get("branch", "main"), subdir=data.get("subdir", ""),
+                                         previews=data.get("previews", False), kind=data.get("kind", "build"))
+                return self._json(200, {"ok": True, **made, "hook_base": repos_mod.hook_base()})
+            if path == "/api/repos/rotate":
+                made = repos_mod.rotate(conn, data.get("repo"))
+                return self._json(200, {"ok": True, **made, "hook_base": repos_mod.hook_base()})
+            repos_mod.disconnect(conn, data.get("repo"))
+            return self._json(200, {"ok": True})
+        except ValueError as e:           # a plain reason: no value is ever in the message
+            return self._json(400, {"error": str(e)})
+        except RuntimeError as e:         # the token file is missing or unsafe
+            print(f"token: {e}", flush=True)
+            return self._json(500, {"error": str(e)})
 
     def _cookie(self, value, max_age):
         return f"{COOKIE}={value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={max_age}"

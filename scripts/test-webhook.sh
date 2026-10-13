@@ -469,9 +469,9 @@ check(d.current_id(cur) in ids and len(ids) == 2, f"the next deploy keeps 2, inc
 
 # --- git ls-remote: only the exact ref counts
 real_git = w.git
-w.git = lambda args, cwd=None, allow_file=False: ("a" * 40 + "\trefs/heads/x/refs/heads/foo\n" + "b" * 40 + "\trefs/heads/foo\n")
+w.git = lambda args, cwd=None, allow_file=False, token=None: ("a" * 40 + "\trefs/heads/x/refs/heads/foo\n" + "b" * 40 + "\trefs/heads/foo\n")
 check(w.remote_tip({"url": "u", "branch": "foo"}, False) == "b" * 40, "the tip is read from exactly refs/heads/<branch>")
-w.git = lambda args, cwd=None, allow_file=False: "a" * 40 + "\trefs/heads/x/refs/heads/foo\n"
+w.git = lambda args, cwd=None, allow_file=False, token=None: "a" * 40 + "\trefs/heads/x/refs/heads/foo\n"
 check(w.remote_tip({"url": "u", "branch": "foo"}, False) == "", "a ref that only ENDS like the branch does not count")
 w.git = real_git
 (d.SITES / "demo-site").mkdir()
@@ -690,5 +690,180 @@ if [ -f "$installed" ]; then
 fi
 
 echo
+echo
+echo "== 16. repos connected from the admin page: own address and secret, static sites, token never logged =="
+# The admin database and token file are the test's own (two switches, as in the other tests).
+export MINI_DEPLOY_TESTING=1 MINI_DEPLOY_ADMIN_DB=$SRC/admin.db MINI_DEPLOY_TOKEN_FILE=$SRC/github-token
+export MINI_DEPLOY_TEST_REPO_URL="file://$ORIGIN"
+touch "$SRC/github-token" && chmod 600 "$SRC/github-token"
+cat > "$SRC/conn.py" <<'PY'
+# Test helper: the same functions the admin page calls. Secrets go to stdout only inside
+# the test's own variables; the token comes from the environment, never argv.
+import json, os, sys
+sys.path.insert(0, "/mnt/c/Users/indra/Code/mini-deploy/scripts")
+import admindb, repos
+op, args = sys.argv[1], sys.argv[2:]
+with admindb.db() as conn:
+    if op == "connect":
+        out = repos.connect(conn, args[0], args[1], subdir=args[2], kind=args[3])
+    elif op == "rotate":
+        out = repos.rotate(conn, args[0])
+    elif op == "disconnect":
+        repos.disconnect(conn, args[0]); out = {}
+    elif op == "token":
+        repos.set_token(os.environ["NEW_TOKEN"]); out = {"token": repos.token_status()}
+    else:
+        out = {"repos": repos.list_repos(conn)}
+print(json.dumps(out))
+PY
+field()     { python3 -c 'import json,sys; print(json.loads(sys.stdin.read())[sys.argv[1]])' "$1" <<<"$2"; }
+sign_key()  { printf '%s' "$2" | KEY="$1" python3 -c 'import sys,os,hmac,hashlib; print("sha256="+hmac.new(os.environ["KEY"].encode(), sys.stdin.buffer.read(), hashlib.sha256).hexdigest())'; }
+post_hook() { # hook_id event delivery body signature -> status code only
+  curl -s -m 10 -o /dev/null -w '%{http_code}' -H "X-GitHub-Event: $2" -H "X-GitHub-Delivery: $3" \
+    -H 'Content-Type: application/json' -H "X-Hub-Signature-256: $5" --data-binary "$4" "http://127.0.0.1:$PORT/webhook/$1"
+}
+check_code() { [ "$3" = "$2" ] && ok "$1 -> $2" || bad "$1 -> $3 (want $2)"; }
+static_commit() {  # marker -> the new commit: the static site lives in site/
+  mkdir -p "$ORIGIN/site"; echo "<h1>static-$1</h1>" > "$ORIGIN/site/index.html"
+  g add -A >/dev/null; g commit -q -m "static $1"; g rev-parse HEAD
+}
+spage() { curl -s -m 3 --resolve "$1.localhost:8080:127.0.0.1" "http://$1.localhost:8080/"; }
+swait() { # app marker seconds
+  local i; for i in $(seq 1 "$3"); do spage "$1" | grep -q -- "$2" && return 0; sleep 1; done; return 1
+}
+
+stop_server
+start_server && ok "server restarted with the admin database as its repo list" || { bad "server did not restart"; cat "$SRC/server.out"; }
+CONN=$(python3 "$SRC/conn.py" connect test/db-repo hook-static site static)
+HOOK=$(field hook_id "$CONN"); SEC=$(field secret "$CONN")
+[[ "$HOOK" =~ ^[0-9a-f]{32}$ ]] && ok "connect makes an address: /webhook/<32 hex>" || bad "connect made a bad address"
+[ "${#SEC}" -eq 64 ] && ok "connect makes a 64-character secret" || bad "connect made a secret of the wrong length"
+
+S1=$(static_commit one); B=$(body test/db-repo refs/heads/main "$S1")
+check_code "a signed push to its own address (static, subfolder site/)" 202 "$(post_hook "$HOOK" push "$(guid)" "$B" "$(sign_key "$SEC" "$B")")"
+swait hook-static "static-one" 90 && ok "a static repo goes live with no build step" || bad "static repo did not go live"
+check_code "the global secret does not open a repo's address" 401 "$(post_hook "$HOOK" push "$(guid)" "$B" "$(sign_key "$SECRET" "$B")")"
+check_code "an unknown address" 401 "$(post_hook 00000000000000000000000000000000 push "$(guid)" "$B" "$(sign_key "$SEC" "$B")")"
+check_code "a malformed address" 404 "$(post_hook nothex push "$(guid)" "$B" "$(sign_key "$SEC" "$B")")"
+OTHER=$(body test/other-repo refs/heads/main "$S1")
+check_code "a validly signed push for another repo, sent to this address" 400 "$(post_hook "$HOOK" push "$(guid)" "$OTHER" "$(sign_key "$SEC" "$OTHER")")"
+
+TOKEN_VALUE=github_pat_TESTONLY$(python3 -c 'import secrets; print(secrets.token_hex(12))')   # test value only
+NEW_TOKEN=$TOKEN_VALUE python3 "$SRC/conn.py" token >/dev/null && ok "token saved from the admin side" || bad "token was not saved"
+r=$(python3 - "$TOKEN_VALUE" <<'PY'
+# The token reaches git only through its environment, base64 encoded, never in argv.
+import sys
+sys.path.insert(0, "/mnt/c/Users/indra/Code/mini-deploy/scripts")
+import webhook as w
+tok = sys.argv[1]
+seen = {}
+class Proc:
+    pid = 0
+    returncode = 0
+    def communicate(self, timeout=None):
+        return "", ""
+def fake(cmd, **kw):
+    seen["cmd"], seen["env"] = cmd, kw.get("env", {})
+    return Proc()
+real = w.subprocess.Popen
+w.subprocess.Popen = fake
+try:
+    w.git(["ls-remote", "--", "x", "refs/heads/main"], token=tok)
+finally:
+    w.subprocess.Popen = real
+header = seen["env"].get("GIT_CONFIG_VALUE_0", "")
+clean_argv = not any(tok in part for part in seen["cmd"])
+in_env = header.startswith("Authorization: basic ") and tok not in header
+no_redirects = "http.followRedirects=false" in seen["cmd"]
+print("PASS" if clean_argv and in_env and no_redirects else "FAIL")
+PY
+)
+[ "$r" = PASS ] && ok "the token is in the environment only (base64), never in argv; redirects are not followed" || bad "token position check: $r"
+
+S2=$(static_commit two); B2=$(body test/db-repo refs/heads/main "$S2")
+check_code "a push with a token on file" 202 "$(post_hook "$HOOK" push "$(guid)" "$B2" "$(sign_key "$SEC" "$B2")")"
+swait hook-static "static-two" 90 && ok "the new commit is live" || bad "the new commit did not go live"
+if newlog | grep -q -- "$TOKEN_VALUE" || grep -q -- "$TOKEN_VALUE" "$SRC/server.out"; then
+  bad "the token appears in the log or the server output"
+else ok "the token is in no log line and no server output"; fi
+
+echo "SECRET=x" > "$ORIGIN/site/.env"; g add -A >/dev/null; g commit -q -m "hostile: env file"; S3=$(g rev-parse HEAD)
+B3=$(body test/db-repo refs/heads/main "$S3")
+check_code "a push with a .env inside the static site" 202 "$(post_hook "$HOOK" push "$(guid)" "$B3" "$(sign_key "$SEC" "$B3")")"
+for i in $(seq 1 90); do newlog | grep "hook-static" | grep -q fail && break; sleep 1; done
+newlog | grep "hook-static" | grep -q fail && ok "the hostile static checkout was refused and logged" || bad "no failure logged for the .env"
+spage hook-static | grep -q "static-two" && ok "the last good static site is still live" || bad "the hostile push changed the live site"
+rm -f "$ORIGIN/site/.env"; g add -A >/dev/null; g commit -q -m "remove the hostile file"
+
+g mv site/index.html site/home.html; g commit -q -m "index.html renamed"; S3b=$(g rev-parse HEAD)
+B3b=$(body test/db-repo refs/heads/main "$S3b")
+check_code "a push whose static folder has no index.html" 202 "$(post_hook "$HOOK" push "$(guid)" "$B3b" "$(sign_key "$SEC" "$B3b")")"
+wait_log "no index.html" 90 && ok "refused and logged: no index.html" || bad "a static folder without index.html was not refused"
+spage hook-static | grep -q "static-two" && ok "the working site stays live" || bad "the site without index.html went live"
+
+ROT=$(python3 "$SRC/conn.py" rotate test/db-repo); SEC2=$(field secret "$ROT")
+S4=$(static_commit three); B4=$(body test/db-repo refs/heads/main "$S4")
+check_code "the old secret stops working after a rotate" 401 "$(post_hook "$HOOK" push "$(guid)" "$B4" "$(sign_key "$SEC" "$B4")")"
+check_code "the new secret works" 202 "$(post_hook "$HOOK" push "$(guid)" "$B4" "$(sign_key "$SEC2" "$B4")")"
+swait hook-static "static-three" 90 && ok "the push signed with the new secret went live" || bad "new secret push did not go live"
+
+chmod 644 "$SRC/admin.db"   # an unsafe database: the webhook must answer, not drop the connection
+check_code "repo database unusable -> an answer (503), not a dropped connection" 503 "$(post_hook "$HOOK" push "$(guid)" "$B4" "$(sign_key "$SEC2" "$B4")")"
+chmod 600 "$SRC/admin.db"
+wait_log "repo database unavailable" 10 && ok "and the reason is logged" || bad "no log line for the database problem"
+
+python3 "$SRC/conn.py" disconnect test/db-repo >/dev/null && ok "repo disconnected" || bad "disconnect failed"
+S5=$(static_commit four); B5=$(body test/db-repo refs/heads/main "$S5")
+check_code "a disconnected repo's address is refused" 401 "$(post_hook "$HOOK" push "$(guid)" "$B5" "$(sign_key "$SEC2" "$B5")")"
+spage hook-static | grep -q "static-three" && ok "nothing was deployed after the disconnect" || bad "a disconnected repo deployed"
+
+chmod 644 "$SRC/github-token"
+units=$(python3 - "$SRC" <<'PY'
+# Units for the review fixes: a queued job of a disconnected repo, an unusable token file,
+# and queued pushes the database cannot check at startup.
+import json, sqlite3, sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "/mnt/c/Users/indra/Code/mini-deploy/scripts")
+import webhook as w
+src = Path(sys.argv[1])
+tmp = Path(tempfile.mkdtemp(prefix="mini-deploy-hook-units-", dir=str(src)))
+w.deploy_mod.LOG_FILE = tmp / "deploy.log"          # never the real deploy log
+def check(ok, msg): print(("ok    " if ok else "FAIL  ") + msg)
+
+st = w.State(b"x" * 32, {"listen": "127.0.0.1", "port": 9, "repos": {}})
+job = {"app": "never-here", "repo": "test/never-connected", "sha": "a" * 40, "url": "", "branch": "main",
+       "subdir": "site", "delivery": w.NO_DELIVERY, "fallback": None, "retried": False,
+       "action": "build", "kind": "static", "private": True}
+w.process(st, job, allow_file=True)
+log = (tmp / "deploy.log").read_text() if (tmp / "deploy.log").exists() else ""
+check("disconnected" in log, "a queued job of a repo that is no longer connected does nothing (logged 'disconnected')")
+
+try:
+    w.job_token({"private": True})
+    check(False, "an unsafe token file raises GitError")
+except w.GitError:
+    check(True, "an unsafe token file is a GitError (a failed push, Redeliver still works)")
+
+sd = tmp / "state"; sd.mkdir()
+(sd / "pending.json").write_text(json.dumps([dict(job, repo="test/db-x", app="db-x")]))
+real = w.repos_mod.repo_by_name
+def busy(_name):
+    raise sqlite3.OperationalError("database is locked")
+w.repos_mod.repo_by_name = busy
+try:
+    n = w.load_pending(w.State(b"x" * 32, {"listen": "127.0.0.1", "port": 9, "repos": {}}, sd))
+finally:
+    w.repos_mod.repo_by_name = real
+check(n == 0 and (sd / "pending.json").exists() and (sd / "pending.bad").exists(),
+      "queued pushes the database cannot check are kept (pending.json stays, copy in pending.bad)")
+PY
+)
+chmod 600 "$SRC/github-token"
+echo "$units"
+grep -q '^FAIL' <<<"$units" && fail=1
+[ -n "$units" ] || bad "the unit checks did not run"
+stop_server
+unset MINI_DEPLOY_TEST_REPO_URL MINI_DEPLOY_TOKEN_FILE MINI_DEPLOY_ADMIN_DB MINI_DEPLOY_TESTING
+
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi
 exit $fail

@@ -29,6 +29,9 @@ RestartPreventExitStatus=1
 # dashboard (until that is retired); everything else is read-only.
 ProtectSystem=strict
 ReadWritePaths=/sites /var/log /var/lib/mini-deploy
+# The GitHub token file (P3b): the only thing in /etc this service may write. "-" = skipped
+# until the owner creates it once (see the admin notes); restart the service after that.
+ReadWritePaths=-/etc/mini-deploy/github-token
 ProtectHome=read-only
 # It needs none of these, so it cannot read them even as root: the webhook secret, the apps'
 # env values, the Cheaper Inference address, and Docker (which would be root on the host).
