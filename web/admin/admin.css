@@ -1,0 +1,34 @@
+/* Admin page only. The shared look is style.css (a copy of web/theme/pink.css).
+   Everything is here because the page's CSP forbids inline style. */
+/* `hidden` must win over the theme's display rules (.row is display: flex). */
+[hidden] { display: none !important; }
+.brand { font-weight: 600; letter-spacing: -0.01em; font-size: clamp(1.5rem, 5vw, 2.1rem); }
+.status { display: grid; gap: 0.35rem; justify-items: start; flex: 1 1 12rem; }
+@media (min-width: 560px) { .status { justify-items: end; text-align: right; } }
+.small { font-size: 0.82rem; }
+.narrow { max-width: 26rem; }
+.message { padding: 0.7rem 1rem; }
+.message[data-state="bad"] { color: var(--deep); font-weight: 600; }
+.app-name { font-size: 1.15rem; }
+.links { display: grid; gap: 0.4rem; }
+.address {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem;
+  background: rgba(255, 255, 255, 0.7); border-radius: var(--radius-sm);
+  padding: 0.5rem 0.5rem 0.5rem 0.9rem;
+}
+.address code { flex: 1 1 14rem; overflow-wrap: anywhere; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.log-row { padding: 0.55rem 0; border-top: 1px solid rgba(255, 255, 255, 0.14); }
+.log-row:first-child { border-top: 0; }
+.audit-row { padding: 0.4rem 0; border-top: 1px solid rgba(42, 34, 39, 0.1); }
+.audit-row:first-child { border-top: 0; }
+.result-ok { color: #9EE3BE; }
+.result-bad { color: #FFB3C9; }
+.audit-row .result-bad { color: var(--deep); font-weight: 600; }
+.audit-row .result-ok { color: var(--muted); }
+.empty { padding: 1rem 0; }
+input[type="password"] {
+  font: inherit; padding: 0.6rem 0.8rem; border-radius: var(--radius-sm);
+  border: 1px solid rgba(42, 34, 39, 0.25); background: rgba(255, 255, 255, 0.85); width: 100%;
+}
+input[type="password"]:focus-visible { outline: 3px solid var(--deep); outline-offset: 2px; }

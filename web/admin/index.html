@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="mini-deploy admin: your apps, their phone addresses, rollback (this PC only)">
+<!-- The server also sends a strict CSP header: only this page's own files may run or load,
+     and no inline style or script. Everything from the server goes in with textContent. -->
+<title>mini-deploy admin</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="admin.css">
+</head>
+<body>
+<main class="wrap stack">
+
+  <header class="glass row between">
+    <div>
+      <p class="eyebrow">this PC only</p>
+      <h1 class="brand">mini-deploy</h1>
+    </div>
+    <div class="status">
+      <span id="overall" class="chip" data-state="ok">loading</span>
+      <p id="updated" class="muted small"></p>
+      <div id="session-buttons" class="row" hidden>
+        <button id="logout" class="pill" type="button">Sign out</button>
+        <button id="logout-all" class="pill" type="button">Sign out everywhere</button>
+      </div>
+    </div>
+  </header>
+
+  <p id="message" class="glass message" role="status" aria-live="polite" hidden></p>
+
+  <section id="login" class="glass stack narrow" aria-labelledby="login-title" hidden>
+    <h2 id="login-title">Sign in</h2>
+    <p id="login-help" class="muted"></p>
+    <form id="login-form" class="stack">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button class="pill pill-dark" type="submit">Sign in</button>
+    </form>
+  </section>
+
+  <div id="main" class="stack" hidden>
+    <section aria-labelledby="apps-title" class="stack">
+      <h2 id="apps-title">Apps</h2>
+      <p id="home-note" class="muted small"></p>
+      <div id="apps" class="grid"></div>
+    </section>
+
+    <section aria-labelledby="log-title" class="dark-card">
+      <h2 id="log-title">Recent deploys</h2>
+      <div id="log"></div>
+    </section>
+
+    <section aria-labelledby="audit-title" class="glass">
+      <h2 id="audit-title">Changes made here</h2>
+      <div id="audit"></div>
+    </section>
+  </div>
+
+  <footer class="muted small">
+    Only this PC can open this page, and only after you sign in. Your phone uses the app's
+    phone address, which works on your home Wi-Fi.
+  </footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

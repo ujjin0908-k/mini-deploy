@@ -319,7 +319,7 @@ def find_secret(dist, forms):
     return None
 
 
-def build_and_deploy(app, repo, install_scripts=False, commit=None):
+def build_and_deploy(app, repo, install_scripts=False, commit=None, refuse_if_held=False):
     """Build and deploy; returns the new release id. commit: the sha being built (the
     webhook knows it), shown in the build log."""
     root, _, _ = deploy_mod.app_paths(app)  # validate the name before spending time
@@ -336,7 +336,7 @@ def build_and_deploy(app, repo, install_scripts=False, commit=None):
     started, t0 = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), time.monotonic()
     result, release, error, info = "fail", None, "", {}
     try:
-        release = _build_locked(app, root, repo, image, install_scripts, capture, info)
+        release = _build_locked(app, root, repo, image, install_scripts, capture, info, refuse_if_held)
         result = "ok"
         return release
     except BaseException as e:
@@ -375,7 +375,7 @@ def load_env(app):
         raise EnvBuildError(f"env values could not be used; nothing was deployed: {e}")
 
 
-def _build_locked(app, root, repo, image, install_scripts, capture, info=None):
+def _build_locked(app, root, repo, image, install_scripts, capture, info=None, refuse_if_held=False):
     info = {} if info is None else info
     # Separate from the deploy lock, so a rollback is never stuck behind a long build.
     with deploy_mod.locked(root, ".build.lock"):
@@ -410,7 +410,8 @@ def _build_locked(app, root, repo, image, install_scripts, capture, info=None):
                 # log header (which cut there) show only the reason.
                 raise BuildError(f"a secret appears in dist/; nothing was deployed: {leaked} "
                                  f"(if it is not secret: appenv.py set ... {leaked} --public)")
-            return deploy_mod.deploy(app, dist)  # the new release id
+            # the new release id; the webhook asks to refuse if a rollback held the app meanwhile
+            return deploy_mod.deploy(app, dist, refuse_if_held=refuse_if_held)
         finally:
             shutil.rmtree(work, ignore_errors=True)  # the temp copy always goes away
 

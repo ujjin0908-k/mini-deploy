@@ -73,6 +73,22 @@
         }
     }
 
+    # Admin page (scripts/admin.py on 127.0.0.1:9300): same gate as the logs page, this PC
+    # only and no proxy headers, THEN its own login, CSRF token and Origin check. "admin" is a
+    # reserved app name, so from anywhere else admin.localhost falls through to @app and 404s.
+    @admin {
+        header_regexp Host ^admin\.localhost:8080$
+        remote_ip 127.0.0.1 ::1
+        not header X-Forwarded-For *
+        not header Forwarded *
+        not header X-Real-IP *
+        not header Tailscale-User-Login *
+        not header Tailscale-Headers-Info *
+    }
+    handle @admin {
+        reverse_proxy 127.0.0.1:9300
+    }
+
     handle @app {
         # Cheaper Inference for the apps (scripts/ci_forwarder.py, 127.0.0.1:9200). This is an
         # in-Caddy reverse proxy to a loopback service, for this one path only. It is NOT a

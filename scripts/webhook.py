@@ -787,7 +787,12 @@ def run_job(job, allow_file, check_tip=True):
         build_dir = src / job["subdir"] if job["subdir"] else src
         if not build_dir.resolve().is_relative_to(src.resolve()):
             raise GitError("sub-folder resolves outside the checkout")
-        release = build_mod.build_and_deploy(job["app"], build_dir, commit=job["sha"])
+        try:
+            # refuse_if_held: the hold is checked again under the deploy lock, just before
+            # going live, so a rollback made while this was building is never undone.
+            release = build_mod.build_and_deploy(job["app"], build_dir, commit=job["sha"], refuse_if_held=True)
+        except deploy_mod.HeldError:
+            return "held", None
     finally:
         shutil.rmtree(work, ignore_errors=True)
     try:

@@ -1,0 +1,65 @@
+# mini-deploy admin page (scripts/admin.py), reached at http://admin.localhost:8080 from this PC only.
+#
+# Install (as root in WSL; the owner approves each step):
+#   cp /mnt/c/Users/indra/Code/mini-deploy/systemd/mini-deploy-admin.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now mini-deploy-admin
+# Set the password once (hidden prompt, in a WSL window):
+#   python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/admin.py set-password
+# Use:
+#   systemctl status mini-deploy-admin       is it running?
+#   journalctl -u mini-deploy-admin -n 50    one line per request (method, path, status)
+
+[Unit]
+Description=mini-deploy admin page (127.0.0.1:9300, behind Caddy admin.localhost, this PC only)
+RequiresMountsFor=/mnt/c/Users/indra/Code/mini-deploy
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/c/Users/indra/Code/mini-deploy
+ExecStart=/usr/bin/python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/admin.py serve
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=5
+RestartPreventExitStatus=1
+
+# Sandbox. It changes releases (rollback), the deploy log, its own database and the
+# dashboard (until that is retired); everything else is read-only.
+ProtectSystem=strict
+ReadWritePaths=/sites /var/log /var/lib/mini-deploy
+ProtectHome=read-only
+# It needs none of these, so it cannot read them even as root: the webhook secret, the apps'
+# env values, the Cheaper Inference address, and Docker (which would be root on the host).
+# ("-" = skip a path that does not exist yet, e.g. apps/ before the first env value is set.)
+InaccessiblePaths=-/etc/mini-deploy/env -/etc/mini-deploy/apps -/etc/mini-deploy/ci.json -/run/docker.sock -/var/run/docker.sock
+# Root, but without root's extra powers: it only touches files root already owns.
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectProc=invisible
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+NoNewPrivileges=yes
+MemoryMax=512M
+TasksMax=256
+# Files it creates are owner-only (its database most of all). The ones it makes in /sites
+# (.hold, the dashboard's release) are root's 0600: fine, Caddy runs as root. If Caddy ever
+# runs as another user, loosen this around the dashboard refresh.
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
