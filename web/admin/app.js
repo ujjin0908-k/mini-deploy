@@ -251,6 +251,7 @@
     $("sb-url").textContent = (hookBase || "") + "/webhook/" + hookId;
     $("sb-secret").textContent = secret;
     $("secret-box").hidden = false;
+    $("secret-box").scrollIntoView({ behavior: "smooth", block: "center" });
   }
   $("sb-done").addEventListener("click", function () {
     $("sb-secret").textContent = "";
@@ -259,7 +260,7 @@
   });
 
   // One request that may answer with a new secret (connect, rotate) or nothing (token, disconnect).
-  function gitAction(path, body, okText) {
+  function gitAction(path, body, okText, onOk) {
     api("POST", path, body).then(function (res) {
       if (res.status === 401) { showLogin(true); say("please sign in again", true); return; }
       if (res.status !== 200) { say(res.data.error || ("failed (" + res.status + ")"), true); return; }
@@ -267,6 +268,7 @@
         ? okText + ". Note: an app with this name already exists; the first push replaces what is live (Roll back still works)."
         : okText);
       if (res.data.secret) { showSecret(res.data.hook_id, res.data.secret, res.data.hook_base); }
+      if (onOk) { onOk(); }
       load();
     }, function () { say("could not reach the admin service", true); });
   }
@@ -301,7 +303,13 @@
     };
     if (!REPO_RE.test(body.repo)) { say("the repo must look like owner/name", true); return; }
     if (!NAME_RE.test(body.app)) { say("the app name may use only a-z, 0-9 and '-' (1 to 40 characters)", true); return; }
-    gitAction("/api/repos/connect", body, "connected " + body.repo + ": its address and secret are shown above, once");
+    gitAction("/api/repos/connect", body, "connected " + body.repo + ": its address and secret are shown in the box below, once",
+      function () {
+        // Done: clear the form so it is clearly finished, and point at the new box.
+        $("connect-form").reset();
+        $("c-branch").value = "main";
+        $("secret-box").scrollIntoView({ behavior: "smooth", block: "center" });
+      });
   });
 
   function renderGithub(data) {

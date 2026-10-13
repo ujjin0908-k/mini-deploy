@@ -32,3 +32,13 @@ input[type="password"] {
   border: 1px solid rgba(42, 34, 39, 0.25); background: rgba(255, 255, 255, 0.85); width: 100%;
 }
 input[type="password"]:focus-visible { outline: 3px solid var(--deep); outline-offset: 2px; }
+/* GitHub forms: one label and one field per line, the fields look like the password box. */
+#github form label { display: block; }
+#github input:not([type]), #github select {
+  display: block; font: inherit; padding: 0.6rem 0.8rem; border-radius: var(--radius-sm);
+  border: 1px solid rgba(42, 34, 39, 0.25); background: rgba(255, 255, 255, 0.85); width: 100%;
+}
+#github input:not([type]):focus-visible, #github select:focus-visible,
+#github input[type="checkbox"]:focus-visible { outline: 3px solid var(--deep); outline-offset: 2px; }
+#github input[type="checkbox"] { width: 1.1rem; height: 1.1rem; margin-right: 0.5rem; vertical-align: middle; }
+#github form button { justify-self: start; align-self: flex-start; }
