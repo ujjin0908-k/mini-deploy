@@ -54,17 +54,22 @@
         address and secret. Private repos also need the token below (read-only).
       </p>
 
-      <div class="stack">
-        <h3>Token for private repos</h3>
-        <p id="token-status" class="muted small"></p>
+      <details id="token-section" class="stack">
+        <summary>GitHub token for private repos: <span id="token-status" class="muted"></span></summary>
         <form id="token-form" class="stack" autocomplete="off">
           <label for="token">Fine-grained token: read-only "Contents", only the repos you pick</label>
           <input id="token" name="token" type="password" autocomplete="off" spellcheck="false" required>
           <button class="pill" type="submit">Save token</button>
         </form>
-      </div>
+      </details>
+    </section>
 
-      <div class="stack">
+    <section id="repos-panel" aria-labelledby="repos-title" class="glass stack">
+      <h2 id="repos-title">Connected repos</h2>
+      <div id="repos"></div>
+      <button id="add-repo" class="pill pill-dark" type="button" hidden>+ Add new repo</button>
+
+      <div id="connect-panel" class="stack" hidden>
         <h3>Connect a repo</h3>
         <form id="connect-form" class="stack" autocomplete="off">
           <label for="c-repo">Repo (owner/name)</label>
@@ -83,24 +88,27 @@
           <label><input id="c-previews" name="previews" type="checkbox"> Build other branches as previews</label>
           <button class="pill pill-dark" type="submit">Connect</button>
         </form>
-      </div>
-
-      <div class="stack">
-        <h3>Connected repos</h3>
-        <div id="repos"></div>
+        <button id="cancel-repo" class="pill" type="button">Cancel</button>
       </div>
 
       <div id="secret-box" class="dark-card stack" hidden>
-        <h3>Add this webhook on GitHub (shown once)</h3>
-        <ol>
-          <li>On the repo: Settings, then Webhooks, then Add webhook.</li>
-          <li>Payload URL: <code id="sb-url" class="mono"></code></li>
-          <li>Content type: application/json.</li>
-          <li>Secret: <code id="sb-secret" class="mono"></code></li>
-          <li>Which events: just the push event.</li>
-        </ol>
-        <p class="muted small">Copy both now. This page will not show the secret again.</p>
-        <button id="sb-done" class="pill" type="button">I have copied it</button>
+        <div id="sb-body" class="stack">
+          <h3>Add this webhook on GitHub (shown once)</h3>
+          <p id="sb-repo" class="small"></p>
+          <ol>
+            <li>On the repo: Settings, then Webhooks, then Add webhook.</li>
+            <li>Payload URL: <code id="sb-url" class="mono"></code></li>
+            <li>Content type: application/json.</li>
+            <li>Secret: <code id="sb-secret" class="mono"></code></li>
+            <li>Which events: just the push event.</li>
+          </ol>
+          <p class="muted small">Copy both now. This page will not show the secret again.</p>
+          <button id="sb-copy" class="pill big" type="button">Copy address and secret</button>
+        </div>
+        <div id="sb-collapsed" class="stack" hidden>
+          <p>Copied. The secret is hidden now: paste it on GitHub.</p>
+          <button id="sb-done" class="pill" type="button">Close</button>
+        </div>
       </div>
     </section>
 
