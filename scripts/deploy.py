@@ -448,18 +448,35 @@ class HeldError(DeployError):
     held = True
 
 
-def deploy(app, src, refuse_if_held=False):
+def deploy(app, src, refuse_if_held=False, lift_hold=False):
     """refuse_if_held: the webhook sets it. A build can take minutes; if a rollback held the
     app meanwhile, going live now would silently undo it. Checked under the deploy lock, the
-    same lock a rollback takes, so the two can never cross. A manual deploy does not set it:
-    that is a clear decision by the owner (and lifts the hold)."""
+    same lock a rollback takes, so the two can never cross.
+
+    lift_hold: a deploy the owner starts by hand (command line, build, upload) is a clear
+    decision, so it lifts the hold. That happens INSIDE the lock: lifted after the lock is
+    let go, it could erase the hold of a rollback that ran in between, and the next push
+    would then undo that rollback."""
     def run():
         root, releases, current = app_paths(app)  # inside run(): a bad name is logged too
         with locked(root):
             if refuse_if_held and is_held(root):
                 raise HeldError("on hold (rolled back while this was building); not deployed")
-            return _deploy_locked(src, root, releases, current)
+            result = _deploy_locked(src, root, releases, current)
+            if lift_hold:
+                _lift_hold(app, root)
+            return result
     return _logged(app, "deploy", run)
+
+
+def _lift_hold(app, root):
+    """After the flip: the new release is live, so a problem here is only a warning."""
+    try:
+        if clear_hold(root):
+            print(f"{app}: hold cleared (manual deploy)")
+    except OSError as e:
+        print(f"warning: {app} is live, but its hold could not be lifted ({type(e).__name__}); "
+              f"run: deploy.py unhold {app}", file=sys.stderr)
 
 
 def deploy_holding_lock(app, src):
@@ -562,11 +579,23 @@ def unhold(app):
     print(f"{app}: webhook deploys resumed" if cleared else f"{app}: was not held")
 
 
-def clear_hold_after_manual_deploy(app):
-    """A deploy the owner starts by hand is a clear decision: lift the hold."""
-    root, _, _ = app_paths(app)
-    if clear_hold(root):
-        print(f"{app}: hold cleared (manual deploy)")
+def drop_empty_releases(name):
+    """A failed FIRST deploy of a normal app (an upload, say) leaves /sites/<name>/ with an
+    empty releases/ folder, and the dashboard lists every folder with releases/ as an app.
+    Remove that empty folder, under the app's lock so a deploy running now is never cut
+    short. The lock files stay, as in drop_if_empty. An app with a release is never touched
+    (rmdir only removes an empty folder)."""
+    if not APP_RE.fullmatch(name) or preview_parent(name) is not None:
+        return
+    root = SITES / name
+    releases = root / "releases"
+    if root.is_symlink() or not root.is_dir() or releases.is_symlink() or not releases.is_dir():
+        return
+    try:
+        with locked(root, wait=15):
+            os.rmdir(releases)
+    except (OSError, DeployError):
+        pass
 
 
 def remove_preview(name, branch=None):
@@ -647,20 +676,18 @@ def main():
                 raise DeployError(f"{args.app} is reserved: {RESERVED_APPS[args.app]} (use --force to override)")
             if PREVIEW_SEP in args.app:
                 raise DeployError(f"names with '{PREVIEW_SEP}' are previews (use: deploy.py preview <app> <branch> <dir>)")
-            deploy(args.app, args.dir)
-            clear_hold_after_manual_deploy(args.app)
+            deploy(args.app, args.dir, lift_hold=True)
         elif args.cmd == "preview":
             if args.app in RESERVED_APPS:
                 raise DeployError(f"{args.app} is reserved: {RESERVED_APPS[args.app]}")
             args.app = preview_name(args.app, args.branch)  # the dashboard refresh below uses it
             check_preview(args.app, args.branch)
             try:
-                deploy(args.app, args.dir)
+                deploy(args.app, args.dir, lift_hold=True)
             except DeployError:
                 drop_if_empty(args.app)
                 raise
             record_preview_branch(args.app, args.branch)
-            clear_hold_after_manual_deploy(args.app)
             print(f"address: http://{args.app}.localhost:8080/")
         elif args.cmd == "remove":
             remove_preview(args.app)

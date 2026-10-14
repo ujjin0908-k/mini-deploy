@@ -13,7 +13,10 @@ program on the PC can reach 127.0.0.1:9300 directly, so the server checks everyt
   - every change needs the session, a CSRF token, Origin = http://admin.localhost:8080, JSON;
   - after 5 wrong passwords in an hour, each further try must wait longer (30 s, doubling,
     at most 15 min); `admin.py unlock` (root, in WSL) clears that;
-  - every change is written to an audit log (action, app, result; never a value).
+  - every change is written to an audit log (action, app, result; never a value);
+  - an upload (a .zip of a static site, at most 50 MB, POST /api/upload/<app>) passes every
+    header check before its body is read, is checked whole by upload.py before any file is
+    written, and is then deployed like any other release (rollback works the same).
 The password is only ever set from WSL, never from the web, so nobody can "set it first".
 State lives in /var/lib/mini-deploy/admin.db (SQLite, owner-only). Standard library only.
 """
@@ -28,9 +31,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -41,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deploy as deploy_mod        # rollback, rollforward, unhold: the same code as the command line
 import dashboard as dashboard_mod  # the app list and recent activity
 import repos as repos_mod          # GitHub repos connected from this page, and the token
+import upload as upload_mod        # checks and unpacks an uploaded .zip (P4)
 from admindb import DB_PATH, audit, db  # the database file (shared with the webhook)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -65,7 +71,13 @@ LENGTH_RE = re.compile(r"^[0-9]{1,6}$")
 ACTION_LOCK_WAIT = 15       # a web action waits this long for a busy app, then says "busy"
 MAX_HANDLERS = 32           # connections handled at once; more get a 503
 REQUEST_DEADLINE = 30       # seconds for a whole request, however slowly it trickles in
-SCRYPT = {"n": 2 ** 15, "r": 8, "p": 1, "maxmem": 64 * 1024 * 1024, "dklen": 32}
+UPLOAD_DEADLINE = 120       # an upload, once every header check has passed, may take this long
+UPLOAD_BODY_TIME = UPLOAD_DEADLINE - 30   # a body that took longer is refused: unpack and deploy need the rest
+UPLOAD_PREFIX = "/api/upload/"
+UPLOAD_LENGTH_RE = re.compile(r"^[0-9]{1,9}$")
+UPLOAD_LOCK = threading.Lock()   # one upload at a time: each may need ~250 MB of disk while it runs
+DISK_MARGIN = 100 * 1024 * 1024  # free space left over after an upload, at the least
+SCRYPT ={"n": 2 ** 15, "r": 8, "p": 1, "maxmem": 64 * 1024 * 1024, "dklen": 32}
 SCRYPT_SLOTS = threading.BoundedSemaphore(2)   # ~32 MB each: never more than two at once
 
 # The only files the page is made of. Anything else is 404: no paths are built from the URL.
@@ -202,6 +214,21 @@ def state():
     return data
 
 
+def upload_problem(conn, app):
+    """Why an upload to `app` is refused, as (status, reason), or None if it may go ahead.
+    The name comes from the URL, so it is checked before any path is built from it."""
+    if not deploy_mod.APP_RE.fullmatch(app):
+        return 400, "the app name may use only a-z, 0-9 and '-' (1 to 40 characters)"
+    if app in deploy_mod.RESERVED_APPS:
+        return 400, f"the app name {app!r} is reserved ({deploy_mod.RESERVED_APPS[app]})"
+    if deploy_mod.PREVIEW_SEP in app:
+        return 400, f"app names may not contain '{deploy_mod.PREVIEW_SEP}' (it is kept for previews)"
+    repo = repos_mod.repo_for_app(conn, app)
+    if repo:
+        return 409, f"{app} is deployed from GitHub ({repo}): push there, or disconnect the repo first"
+    return None
+
+
 # ---------------------------------------------------------------- the web side
 
 def _clean(text, limit=100):
@@ -308,7 +335,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self._path()
         if not self._host_ok() or path is None:
             return self._not_found()
-        if path not in ("/api/login", "/api/logout", "/api/logout-all", "/api/action") + REPO_ROUTES:
+        upload_app = path[len(UPLOAD_PREFIX):] if path.startswith(UPLOAD_PREFIX) else None
+        if upload_app is None and path not in ("/api/login", "/api/logout", "/api/logout-all", "/api/action") + REPO_ROUTES:
             return self._not_found()
         # Only this page may send changes: exactly our Origin, a same-origin fetch, JSON.
         if self.headers.get("Origin") != ORIGIN:
@@ -316,6 +344,8 @@ class Handler(BaseHTTPRequestHandler):
         fetch_site = self.headers.get("Sec-Fetch-Site")
         if fetch_site is not None and fetch_site != "same-origin":
             return self._json(403, {"error": "refused: not from this page"})
+        if upload_app is not None:      # a .zip, not JSON: its own size rules and body handling
+            return self._upload(upload_app)
         if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/json":
             return self._json(415, {"error": "send JSON"})
         if self.headers.get("Transfer-Encoding"):
@@ -377,6 +407,131 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as e:         # the token file is missing or unsafe
             print(f"token: {e}", flush=True)
             return self._json(500, {"error": str(e)})
+
+    # --- uploads (P4)
+    def _upload(self, app):
+        """POST /api/upload/<app>: a .zip of a static site goes live as <app>. Every check
+        that needs only the headers runs before one byte of the body is read."""
+        if (self.headers.get("Content-Type") or "").split(";")[0].strip() != "application/zip":
+            return self._json(415, {"error": "send a .zip file"})
+        if self.headers.get("Transfer-Encoding") or self.headers.get("Content-Length") is None:
+            return self._json(411, {"error": "send a Content-Length"})
+        raw_length = self.headers.get("Content-Length")
+        if not UPLOAD_LENGTH_RE.fullmatch(raw_length):   # digits only: no "-1", " 5" or "+5"
+            return self._json(400, {"error": "bad Content-Length"})
+        size = int(raw_length)
+        if size > upload_mod.MAX_UPLOAD:   # answered without reading: the body may be huge
+            return self._json(413, {"error": f"the zip is larger than {upload_mod.MAX_UPLOAD // 2**20} MB"})
+        if size == 0:
+            return self._json(400, {"error": "the upload is empty"})
+        with db() as conn:
+            sess = find_session(conn, self._token())
+            if not sess:   # answered without reading: a stranger gets none of our time for 50 MB
+                return self._json(401, {"error": "sign in first"})
+            given = self.headers.get("X-CSRF-Token") or ""
+            if not hmac.compare_digest(given.encode("utf-8", "replace"), sess["csrf"].encode("ascii")):
+                return self._json(403, {"error": "refused: missing or wrong CSRF token"})
+            problem = upload_problem(conn, app)
+        # From here on the request is the owner's own: a refusal reads the body first (so the
+        # page shows the reason) and is audited.
+        if problem:
+            return self._refuse_upload(app, size, *problem)
+        if not UPLOAD_LOCK.acquire(blocking=False):
+            return self._refuse_upload(app, size, 409, "another upload is running; try again in a moment")
+        try:
+            return self._upload_locked(app, size)
+        finally:
+            UPLOAD_LOCK.release()
+
+    def _audit_upload(self, app, result):
+        """One audit row per upload the owner sent (the app name only if it is a valid one)."""
+        try:
+            with db() as conn:
+                audit(conn, "upload", app if deploy_mod.APP_RE.fullmatch(app) else "-", result)
+            return True
+        except Exception as e:  # noqa: BLE001  (never hide what happened behind an audit problem)
+            print(f"audit write failed: {type(e).__name__}", flush=True)
+            return False
+
+    def _refuse_upload(self, app, size, status, message):
+        """Audit, then read and drop the body (at most MAX_UPLOAD, inside the normal deadline)
+        so the browser sees the answer: closing with unread data resets the connection."""
+        self._audit_upload(app, "refused")
+        left = size
+        while left > 0:
+            try:
+                chunk = self.rfile.read(min(upload_mod.CHUNK, left))
+            except OSError:
+                break
+            if not chunk:
+                break
+            left -= len(chunk)
+        return self._json(status, {"error": message})
+
+    def _upload_locked(self, app, size):
+        # Only now, after every check: a request without a session never gets the longer time.
+        extend = getattr(_CONN, "extend", None)
+        if extend:
+            extend(UPLOAD_DEADLINE)
+        started = time.monotonic()
+        work = Path(tempfile.mkdtemp(prefix="mini-deploy-upload-", dir=upload_mod.TMP_ROOT))
+        status, reply, result = 200, {"ok": True}, "ok"
+        try:
+            # The unpacked site and deploy.py's private copy of it exist at the same time: on
+            # one disk, both count.
+            same_disk = os.stat(work).st_dev == os.stat(deploy_mod.SITES).st_dev
+            need = size + upload_mod.MAX_UNPACKED + DISK_MARGIN + (upload_mod.MAX_UNPACKED if same_disk else 0)
+            if shutil.disk_usage(work).free < need or \
+                    shutil.disk_usage(deploy_mod.SITES).free < upload_mod.MAX_UNPACKED + DISK_MARGIN:
+                return self._refuse_upload(app, size, 507, "not enough free disk space for this upload")
+            zip_path = work / "upload.zip"
+            try:
+                got = self._read_body_to(zip_path, size)
+            except OSError as e:   # a timeout, a reset, a full disk: a refused upload, logged as one
+                raise upload_mod.UploadError(f"the upload could not be received ({type(e).__name__})")
+            if got != size:
+                raise upload_mod.UploadError("the upload was cut off before the end")
+            if time.monotonic() - started > UPLOAD_BODY_TIME:
+                # The connection's deadline could cut the answer from here on: going live while
+                # the page is told it failed is worse than asking for the upload again.
+                raise upload_mod.UploadError("the upload took too long to arrive; nothing was deployed (try again)")
+            site = work / "site"
+            site.mkdir()
+            root = upload_mod.unpack(zip_path, site)
+            zip_path.unlink()                  # free its space before the copy into /sites
+            # An upload is the owner's own decision: it lifts a hold, inside the deploy lock.
+            release = deploy_mod.deploy(app, root, lift_hold=True)
+            reply = {"ok": True, "release": release}
+        except upload_mod.UploadError as e:   # refused before deploying: say so in the deploy log too
+            status, reply, result = 400, {"error": str(e)}, "fail"
+            deploy_mod.log_event(app, "upload", None, "fail", started, str(e))
+        except deploy_mod.DeployError as e:   # deploy.py has logged it already
+            status, reply, result = 409, {"error": str(e)}, "fail"
+            deploy_mod.drop_empty_releases(app)   # a failed FIRST upload leaves no empty app behind
+        except Exception as e:  # noqa: BLE001  (never a dropped connection without a record)
+            print(f"upload {app}: {type(e).__name__}", flush=True)
+            status, result = 500, "error"
+            reply = {"error": f"unexpected error ({type(e).__name__}); see journalctl -u mini-deploy-admin"}
+            deploy_mod.drop_empty_releases(app)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        if not self._audit_upload(app, result):
+            reply["warning"] = "done, but the audit log could not be written"
+        deploy_mod._refresh_dashboard(app)
+        return self._json(status, reply)
+
+    def _read_body_to(self, path, size):
+        """The body straight into a private file, in chunks: never the whole zip in memory."""
+        got = 0
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as out:
+            while got < size:
+                chunk = self.rfile.read(min(upload_mod.CHUNK, size - got))
+                if not chunk:
+                    break
+                out.write(chunk)
+                got += len(chunk)
+        return got
 
     def _cookie(self, value, max_age):
         return f"{COOKIE}={value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={max_age}"
@@ -468,6 +623,11 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(status, reply)
 
 
+# Per connection (each runs in its own thread): lets an upload that has passed every check
+# extend its own deadline. Nothing else can reach it.
+_CONN = threading.local()
+
+
 class Server(ThreadingHTTPServer):
     """At most MAX_HANDLERS connections at once (more get a 503 at once), and each request has
     an overall deadline, so a client dripping one byte at a time cannot hold a thread."""
@@ -498,13 +658,24 @@ class Server(ThreadingHTTPServer):
         def cut():
             with contextlib.suppress(OSError):
                 request.shutdown(socket.SHUT_RDWR)
-        timer = threading.Timer(self.deadline, cut)
-        timer.daemon = True
-        timer.start()
+        start = time.monotonic()
+        timer = [threading.Timer(self.deadline, cut)]
+        timer[0].daemon = True
+        timer[0].start()
+
+        def extend(total):
+            """The whole request may now take `total` seconds from its start (uploads only)."""
+            timer[0].cancel()
+            later = threading.Timer(max(0.0, total - (time.monotonic() - start)), cut)
+            later.daemon = True
+            later.start()
+            timer[0] = later
+        _CONN.extend = extend
         try:
             super().process_request_thread(request, client_address)
         finally:
-            timer.cancel()
+            _CONN.extend = None
+            timer[0].cancel()
             self.slots.release()
 
     def handle_error(self, request, client_address):  # one quiet line, not a traceback

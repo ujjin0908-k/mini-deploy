@@ -76,6 +76,20 @@ def _taken_by_config(full_name, app):
         any(isinstance(v, dict) and v.get("app") == app for v in cfg.values())
 
 
+def repo_for_app(conn, app):
+    """The repo that deploys this app (connected on the admin page or in config/webhook.json),
+    or None. An upload to such an app is refused: the next push would silently replace it."""
+    row = conn.execute("SELECT full_name FROM repos WHERE app = ?", (app,)).fetchone()
+    if row:
+        return row[0]
+    cfg = _config().get("repos")
+    if isinstance(cfg, dict):
+        for full_name, entry in cfg.items():
+            if isinstance(entry, dict) and entry.get("app") == app:
+                return full_name
+    return None
+
+
 def _check(full_name, app, branch, subdir, previews, kind):
     """Returns the cleaned fields or raises ValueError with a plain reason."""
     if not isinstance(full_name, str) or not REPO_RE.fullmatch(full_name):

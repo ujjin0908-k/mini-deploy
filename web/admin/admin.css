@@ -49,6 +49,15 @@ input[type="password"]:focus-visible { outline: 3px solid var(--deep); outline-o
 #github form button, #repos-panel form button, #repos-panel > button, #repos-panel #cancel-repo {
   justify-self: start; align-self: flex-start;
 }
+/* Upload card (P4): the same field look as the GitHub forms. */
+#upload-panel form label { display: block; }
+#upload-panel input:not([type]) {
+  display: block; font: inherit; padding: 0.6rem 0.8rem; border-radius: var(--radius-sm);
+  border: 1px solid rgba(42, 34, 39, 0.25); background: rgba(255, 255, 255, 0.85); width: 100%;
+}
+#upload-panel input[type="file"] { display: block; font: inherit; max-width: 100%; }
+#upload-panel input:focus-visible { outline: 3px solid var(--deep); outline-offset: 2px; }
+#upload-panel form button { justify-self: start; align-self: flex-start; }
 /* The one big button: copies the webhook address and secret. */
 .big { padding: 0.9rem 1.5rem; font-size: 1.05rem; }
 #token-section summary { cursor: pointer; font-weight: 600; }

@@ -319,9 +319,10 @@ def find_secret(dist, forms):
     return None
 
 
-def build_and_deploy(app, repo, install_scripts=False, commit=None, refuse_if_held=False):
+def build_and_deploy(app, repo, install_scripts=False, commit=None, refuse_if_held=False, lift_hold=False):
     """Build and deploy; returns the new release id. commit: the sha being built (the
-    webhook knows it), shown in the build log."""
+    webhook knows it), shown in the build log. lift_hold: a build the owner starts by hand
+    lifts a hold, inside the deploy lock (see deploy.deploy)."""
     root, _, _ = deploy_mod.app_paths(app)  # validate the name before spending time
     repo = Path(repo).resolve()
     if not (repo / "package.json").is_file():
@@ -336,7 +337,7 @@ def build_and_deploy(app, repo, install_scripts=False, commit=None, refuse_if_he
     started, t0 = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), time.monotonic()
     result, release, error, info = "fail", None, "", {}
     try:
-        release = _build_locked(app, root, repo, image, install_scripts, capture, info, refuse_if_held)
+        release = _build_locked(app, root, repo, image, install_scripts, capture, info, refuse_if_held, lift_hold)
         result = "ok"
         return release
     except BaseException as e:
@@ -375,7 +376,8 @@ def load_env(app):
         raise EnvBuildError(f"env values could not be used; nothing was deployed: {e}")
 
 
-def _build_locked(app, root, repo, image, install_scripts, capture, info=None, refuse_if_held=False):
+def _build_locked(app, root, repo, image, install_scripts, capture, info=None, refuse_if_held=False,
+                  lift_hold=False):
     info = {} if info is None else info
     # Separate from the deploy lock, so a rollback is never stuck behind a long build.
     with deploy_mod.locked(root, ".build.lock"):
@@ -411,7 +413,7 @@ def _build_locked(app, root, repo, image, install_scripts, capture, info=None, r
                 raise BuildError(f"a secret appears in dist/; nothing was deployed: {leaked} "
                                  f"(if it is not secret: appenv.py set ... {leaked} --public)")
             # the new release id; the webhook asks to refuse if a rollback held the app meanwhile
-            return deploy_mod.deploy(app, dist, refuse_if_held=refuse_if_held)
+            return deploy_mod.deploy(app, dist, refuse_if_held=refuse_if_held, lift_hold=lift_hold)
         finally:
             shutil.rmtree(work, ignore_errors=True)  # the temp copy always goes away
 
@@ -439,7 +441,7 @@ def main():
         if args.preview is not None:
             args.app = deploy_mod.preview_name(args.app, args.preview)
             deploy_mod.check_preview(args.app, args.preview)
-        build_and_deploy(args.app, args.repo, args.install_scripts)
+        build_and_deploy(args.app, args.repo, args.install_scripts, lift_hold=True)  # the owner's own build
         if args.preview is not None:
             deploy_mod.record_preview_branch(args.app, args.preview)
     except (BuildError, deploy_mod.DeployError) as e:
@@ -448,7 +450,6 @@ def main():
         rc = 1
     else:
         deploy_mod.log_event(args.app, "build", None, "ok", started)
-        deploy_mod.clear_hold_after_manual_deploy(args.app)  # a build the owner starts lifts a hold
     deploy_mod._refresh_dashboard(args.app)  # after failures too; never turns into an error
     return rc
 

@@ -112,6 +112,22 @@
       </div>
     </section>
 
+    <section id="upload-panel" aria-labelledby="upload-title" class="glass stack">
+      <h2 id="upload-title">Upload a site</h2>
+      <p class="muted small">
+        A .zip of a finished static site with index.html at the top (or one folder that holds it),
+        at most 50 MB. It goes live at once, and Roll back still works. An app that deploys from
+        GitHub is refused here: push to its repo instead.
+      </p>
+      <form id="upload-form" class="stack" autocomplete="off">
+        <label for="u-app">App name on this PC (a-z, 0-9, -)</label>
+        <input id="u-app" name="app" required spellcheck="false">
+        <label for="u-file">Zip file</label>
+        <input id="u-file" name="file" type="file" accept=".zip,application/zip" required>
+        <button id="u-send" class="pill pill-dark" type="submit">Upload</button>
+      </form>
+    </section>
+
     <section aria-labelledby="log-title" class="dark-card">
       <h2 id="log-title">Recent deploys</h2>
       <div id="log"></div>

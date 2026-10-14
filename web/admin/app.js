@@ -52,6 +52,7 @@
     // Nothing from the signed-in view may stay in the page: the one-time secret, the form, the token.
     clearSecret();
     $("connect-form").reset();
+    $("upload-form").reset();
     $("token").value = "";
     addOpen = false;
     tokenDecided = false;
@@ -210,6 +211,7 @@
       ? "This PC is on your home Wi-Fi: the phone addresses below work there."
       : "This PC is not on your home Wi-Fi right now, so phone addresses are hidden.";
 
+    knownApps = data.apps.map(function (a) { return a.name; });
     var apps = $("apps");
     apps.textContent = "";
     if (!data.apps.length) { apps.appendChild(el("p", "muted empty", "No apps yet.")); }
@@ -401,6 +403,59 @@
       list.appendChild(row);
     });
   }
+
+  // ---------------------------------------------------------------- uploads (P4)
+  // The zip goes as the request body itself (no form encoding). The server checks everything
+  // again; these checks only save a pointless 50 MB send.
+  var MAX_UPLOAD = 50 * 1024 * 1024;
+  var knownApps = [];
+  var uploading = false;
+
+  $("upload-form").addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (uploading) { return; }
+    var app = $("u-app").value.trim();
+    var file = $("u-file").files[0];
+    if (!NAME_RE.test(app) || app.indexOf("--") >= 0) {
+      say("the app name may use only a-z, 0-9 and '-' (1 to 40 characters, no '--')", true);
+      return;
+    }
+    if (!file) { say("pick a .zip file", true); return; }
+    if (file.size === 0) { say("that file is empty", true); return; }
+    if (file.size > MAX_UPLOAD) { say("the zip is larger than 50 MB", true); return; }
+    if (knownApps.indexOf(app) >= 0 &&
+        !window.confirm("Replace what is live on " + app + " with this zip? Roll back still works.")) { return; }
+    uploading = true;
+    var button = $("u-send");
+    button.disabled = true;
+    button.textContent = "Uploading...";
+    say("uploading " + app + "...");
+    fetch("/api/upload/" + encodeURIComponent(app), {
+      method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "Content-Type": "application/zip", "X-CSRF-Token": csrf || "" },
+      body: file
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (data) {
+        return { status: r.status, data: data || {} };
+      });
+    }).then(function (res) {
+      if (res.status === 401) { showLogin(true); say("please sign in again", true); return; }
+      if (res.status !== 200) { say(app + ": " + (res.data.error || ("upload failed (" + res.status + ")")), true); return; }
+      say(app + ": uploaded and live (release " + res.data.release + ")" +
+        (res.data.warning ? ". " + res.data.warning : ""));
+      $("upload-form").reset();
+      load();
+    }, function () {
+      // The connection broke before the answer came. The server may still have finished,
+      // so the page re-reads what is live instead of guessing.
+      say("the connection broke before the answer came: the upload may still have gone live; check Recent deploys", true);
+      load();
+    }).then(function () {
+      uploading = false;
+      button.disabled = false;
+      button.textContent = "Upload";
+    });
+  });
 
   // Refreshes can overlap. Only the newest answer is shown, so an old one that arrives late cannot undo a change.
   var loadSent = 0;
