@@ -72,7 +72,7 @@
       return;
     }
     shown.forEach(function (app) { apps.appendChild(card(app)); });
-    // logs.localhost/#demo-site (the dashboard links like that): open that app's newest build.
+    // logs.localhost/#demo-site (the admin page links like that): open that app's newest build.
     var wanted = decodeURIComponent(location.hash.slice(1));
     if (NAME_RE.test(wanted)) {
       var app = shown.filter(function (a) { return a.name === wanted; })[0];

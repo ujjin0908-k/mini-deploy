@@ -6,13 +6,13 @@
 set -euo pipefail
 REPO=/mnt/c/Users/indra/Code/mini-deploy
 
-for dest in web/dashboard/style.css web/landing/style.css web/logs/style.css web/admin/style.css examples/static-site/src/style.css \
-            dashboard-explained/style.css demo-site-explained/style.css landing-explained/style.css; do
+for dest in web/landing/style.css web/logs/style.css web/admin/style.css examples/static-site/src/style.css \
+            demo-site-explained/style.css landing-explained/style.css; do
   cp "$REPO/web/theme/pink.css" "$REPO/$dest"
   echo "synced $dest"
 done
 
-for dest in dashboard-explained/explain.css demo-site-explained/explain.css landing-explained/explain.css; do
+for dest in demo-site-explained/explain.css landing-explained/explain.css; do
   cp "$REPO/web/theme/explain.css" "$REPO/$dest"
   echo "synced $dest"
 done

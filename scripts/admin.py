@@ -517,7 +517,6 @@ class Handler(BaseHTTPRequestHandler):
             shutil.rmtree(work, ignore_errors=True)
         if not self._audit_upload(app, result):
             reply["warning"] = "done, but the audit log could not be written"
-        deploy_mod._refresh_dashboard(app)
         return self._json(status, reply)
 
     def _read_body_to(self, path, size):
@@ -619,7 +618,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001  (the action already happened; say so, do not hide it)
             print(f"audit write failed: {type(e).__name__}", flush=True)
             reply["warning"] = "done, but the audit log could not be written"
-        deploy_mod._refresh_dashboard(app)   # after failures too, like the command line
         return self._json(status, reply)
 
 

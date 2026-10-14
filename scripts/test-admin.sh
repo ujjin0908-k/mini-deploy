@@ -5,7 +5,6 @@
 # real service. It never deletes anything itself. Pass = every check ok.
 set -uo pipefail
 REPO=/mnt/c/Users/indra/Code/mini-deploy
-export MINI_DEPLOY_NO_DASHBOARD=1
 fail=0
 ok()  { echo "ok    $*"; }
 bad() { echo "FAIL  $*"; fail=1; }

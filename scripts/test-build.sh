@@ -8,7 +8,6 @@
 # Pass = host has no node, the built page is live, a broken or hostile build
 # changes nothing, and the build box is non-root, read-only and has no .env.
 set -uo pipefail
-export MINI_DEPLOY_NO_DASHBOARD=1   # keep the real dashboard's releases quiet during tests
 
 REPO=/mnt/c/Users/indra/Code/mini-deploy
 BUILD="python3 $REPO/scripts/build.py build"
@@ -483,13 +482,13 @@ except build.BuildError as e:
     took = __import__("time").monotonic() - t0
     check("larger than" in str(e) and took < 2, f"a dist over 500 MB is refused before reading ({took:.2f}s)")
 
-# the dashboard shows a reason word, never the key name, for the new errors
+# the admin page shows a reason word, never the key name, for the new errors
 import dashboard
 for detail, word in [("env values could not be used; nothing was deployed: GIT_TOKEN is not allowed", "env problem"),
                      ("o/r abc1234 d (fallback) env values could not be used; nothing was deployed: x", "env problem"),
                      ("a secret appears in dist/; nothing was deployed: GIT_TOKEN (if it is not secret ...)", "refused: secret in output")]:
     got = dashboard.public_detail("build", "fail", detail)
-    check(word in got and "GIT_TOKEN" not in got, f"dashboard says {got!r}")
+    check(word in got and "GIT_TOKEN" not in got, f"the admin page says {got!r}")
 
 # the webhook does not walk the fallback chain for an env-file problem (it would fail the same)
 import deploy, webhook

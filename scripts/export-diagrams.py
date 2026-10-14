@@ -23,7 +23,6 @@ VAULT_IMAGES = Path("/mnt/c/Users/indra/OneDrive/Desktop/obsidian/skeloton/ai_wo
 
 # page -> names for its drawings, in the order they appear on the page
 PAGES = {
-    "dashboard-explained/index.html": ["dashboard-anatomy", "dashboard-data-flow", "dashboard-refresh-loop"],
     "demo-site-explained/index.html": ["demo-site-journey", "demo-site-releases"],
     "landing-explained/index.html": ["landing-layout", "landing-deploy-compare", "landing-glass-recipe",
                                      "landing-theme-sync"],

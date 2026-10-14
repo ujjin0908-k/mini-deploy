@@ -6,7 +6,6 @@
 # through Caddy. Part 4 checks the real service behind Caddy. Nothing is deleted here.
 # Pass = every check ok.
 set -uo pipefail
-export MINI_DEPLOY_NO_DASHBOARD=1
 fail=0
 
 echo "== 1. the zip checker (upload.py) =="
@@ -445,7 +444,7 @@ try:
 finally:
     deploy.check_tree = orig_check
 check(st == 409 and not (deploy.SITES / "upl-fresh" / "releases").exists(),
-      "a failed FIRST upload leaves no empty app behind (no releases/ for the dashboard to list)")
+      "a failed FIRST upload leaves no empty app behind (no releases/ for the admin page to list)")
 
 # The command line uses the same in-lock lift (deploy.py deploy <app> <dir>).
 src = tmp / "cli-src"; src.mkdir()

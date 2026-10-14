@@ -952,11 +952,6 @@ def worker(state, allow_file):
             state.seen.remove(job["delivery"])
         finally:
             state.jobs.done(job)  # no longer needs saving (a busy retry was re-queued itself)
-        try:
-            import dashboard as dashboard_mod  # lazy: only the worker needs it
-            dashboard_mod.maybe_refresh()      # show the new state; never raises
-        except Exception:  # noqa: BLE001
-            pass
         sweep_hook_dirs()
 
 

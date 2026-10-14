@@ -1,43 +1,31 @@
 #!/usr/bin/env python3
-"""mini-deploy stage 6: build the dashboard's data and deploy it as the app `dashboard`.
+"""mini-deploy: the app list and recent activity, read from disk, for the admin page.
 
-    dashboard.py                    refresh the live dashboard (does nothing if unchanged)
-    dashboard.py --force            deploy even if nothing changed, and lift a hold on it
-    dashboard.py --out DIR          write the site into DIR instead of deploying (tests)
+collect() reads what is on disk: /sites/<app>/releases, the live link, holds, the deploy
+log. scripts/admin.py shows it (this PC only). Until 2026-10-15 this module also published
+it as the app `dashboard` for the home Wi-Fi; that page is retired (the phone only opens
+apps, and the admin page has everything the dashboard had).
 
-The page itself is static (web/dashboard). This script only produces data.json from
-what is on disk: /sites/<app>/releases, the live link, the deploy log. It deploys the
-result through deploy.py like any other app, so the platform hosts its own face.
-
-The page is visible to everyone on the home Wi-Fi, so it publishes only a SHORT REASON
-for a failure ("build failed", "timed out") and the short commit id, never the error text:
-that can contain paths, git output or the tail of a build log. The full text stays in
-/var/log/mini-deploy.log, which only this machine can read. Standard library only.
+public_detail() still turns a log line into a SHORT REASON ("build failed", "timed out")
+and the short commit id, never the error text: that can contain paths, git output or the
+tail of a build log. The full text stays in /var/log/mini-deploy.log. Standard library only.
 """
 
-import argparse
 import json
 import os
 import re
-import shutil
 import sys
-import tempfile
 import time
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 import deploy as deploy_mod  # noqa: E402
 
-APP_NAME = "dashboard"
-SRC_DIR = REPO_ROOT / "web" / "dashboard"
-MAX_EVENTS = 40          # rows shown in "Recent activity"
+OLD_PAGE = "dashboard"   # the retired Wi-Fi page: its folder and old log lines are not an app
+MAX_EVENTS = 40          # rows shown in "Recent deploys"
 SHOW_RELEASES = 8
 LOG_TAIL_BYTES = 256 * 1024   # only the end of the log is read; it has no rotation yet
-REFRESH_LOCK_WAIT = 15   # seconds; another refresh takes about one
-WORK_PREFIX = "mini-deploy-dash-"
-STALE_AGE = 3600
 
 # One deploy-log line: ts app action release result duration [detail]
 LINE_RE = re.compile(
@@ -46,7 +34,7 @@ LINE_RE = re.compile(
     r"(?: (?P<detail>.*))?$"
 )
 SHA7_RE = re.compile(r"^[0-9a-f]{7,40}$")
-NOT_APPS = {"webhook", "invalid-name", APP_NAME}   # log "apps" that are not real apps
+NOT_APPS = {"webhook", "invalid-name", OLD_PAGE}   # log "apps" that are not real apps
 
 # What a failure is called on the page. First match wins; checked against the error
 # message only (the build-output tail is cut off first), so output cannot pick the label.
@@ -73,8 +61,8 @@ REASONS = [
 # ---------------------------------------------------------------- what the page may show
 
 def public_detail(action, result, detail):
-    """A short, safe summary of a log line for a page the whole Wi-Fi can read.
-    Only fixed words, a 7-character commit id and a release id ever come out."""
+    """A short, safe summary of a log line. Only fixed words, a 7-character commit id and
+    a release id ever come out."""
     detail = detail or ""
     parts = []
     if result in ("fail", "crash"):
@@ -101,8 +89,8 @@ def collect_apps(sites_root):
     for path in sorted(Path(sites_root).iterdir()):
         if not path.is_dir() or not deploy_mod.APP_RE.fullmatch(path.name):
             continue
-        if path.name == APP_NAME:
-            continue  # listing itself would change the data on every refresh, forever
+        if path.name == OLD_PAGE:
+            continue  # the retired Wi-Fi page, if its folder is still there
         releases = path / "releases"
         if not releases.is_dir():
             continue  # a folder without releases is not a deployed app
@@ -179,7 +167,7 @@ def collect(sites_root=None, log_file=None):
         {"ts": ev["ts"], "app": ev["app"], "action": ev["action"], "release": ev["release"],
          "result": ev["result"], "duration": ev["duration"],
          "detail": public_detail(ev["action"], ev["result"], ev["detail"])}
-        for ev in parsed if ev["app"] != APP_NAME  # its own refreshes are just noise
+        for ev in parsed if ev["app"] != OLD_PAGE  # the old page's own refreshes are noise
     ][-MAX_EVENTS:]
 
     apps = collect_apps(sites_root)
@@ -187,98 +175,3 @@ def collect(sites_root=None, log_file=None):
     return {"generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "apps": apps, "events": events,
             "attention": sorted(a for a, bad in broken.items() if bad and a in present)}
-
-
-def _comparable(data):
-    return {k: v for k, v in data.items() if k != "generated_at"}
-
-
-def write_site(out_dir, data):
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for src in SRC_DIR.iterdir():
-        if src.is_file() and not src.is_symlink() and not src.name.startswith("."):
-            shutil.copy2(src, out_dir / src.name)
-    (out_dir / "data.json").write_text(json.dumps(data, indent=1), encoding="utf-8")
-
-
-# ---------------------------------------------------------------- refreshing
-
-def sweep_stale():
-    """A kill skips `finally`; remove clearly old work folders of ours."""
-    now = time.time()
-    for p in Path("/var/tmp").glob(WORK_PREFIX + "*"):
-        try:
-            if p.is_dir() and now - p.stat().st_mtime > STALE_AGE:
-                shutil.rmtree(p, ignore_errors=True)
-        except OSError:
-            pass
-
-
-def refresh(force=False):
-    """Regenerate and deploy. Returns the release id, or None if nothing changed or the
-    dashboard is on hold. Collect, compare and deploy all happen under the dashboard's
-    lock, so an older snapshot can never be deployed over a newer one."""
-    root = deploy_mod.SITES / APP_NAME
-    sweep_stale()
-    with deploy_mod.locked(root, wait=REFRESH_LOCK_WAIT):
-        if force:
-            deploy_mod.clear_hold(root)       # a forced refresh is a manual decision
-        elif deploy_mod.is_held(root):
-            return None                       # someone rolled the dashboard back on purpose
-        data = collect()
-        if not force:
-            try:
-                old = json.loads((root / "current" / "data.json").read_text(encoding="utf-8"))
-                if _comparable(old) == _comparable(data):
-                    return None
-            except (OSError, ValueError):
-                pass
-        work = Path(tempfile.mkdtemp(prefix=WORK_PREFIX, dir="/var/tmp"))
-        try:
-            write_site(work / "site", data)
-            return deploy_mod.deploy_holding_lock(APP_NAME, work / "site")
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
-
-
-def maybe_refresh():
-    """Called after a deploy, rollback or webhook job. Never raises: a broken dashboard
-    must not break a deploy. Tests set MINI_DEPLOY_NO_DASHBOARD to keep releases quiet."""
-    if os.environ.get("MINI_DEPLOY_NO_DASHBOARD"):
-        return
-    try:
-        refresh()
-    except Exception as e:  # noqa: BLE001
-        print(f"warning: dashboard refresh failed: {type(e).__name__}: {e}", file=sys.stderr)
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--force", action="store_true")
-    parser.add_argument("--out", help="write the site here instead of deploying")
-    parser.add_argument("--log-file", help=argparse.SUPPRESS)      # tests only, with --out
-    parser.add_argument("--sites-root", help=argparse.SUPPRESS)    # tests only, with --out
-    args = parser.parse_args()
-    if (args.log_file or args.sites_root) and not args.out:
-        # test data must never be deployed as the real dashboard
-        print("error: --log-file and --sites-root only work together with --out", file=sys.stderr)
-        return 1
-    try:
-        if args.out:
-            write_site(args.out, collect(args.sites_root, args.log_file))
-            print(f"wrote the site to {args.out}")
-            return 0
-        release = refresh(args.force)
-    except deploy_mod.DeployError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    if release is None:
-        held = deploy_mod.is_held(deploy_mod.SITES / APP_NAME)
-        print("dashboard is on hold (rolled back); use --force to refresh it anyway" if held
-              else "dashboard is up to date (nothing changed)")
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

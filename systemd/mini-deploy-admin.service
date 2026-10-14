@@ -25,8 +25,8 @@ Restart=on-failure
 RestartSec=5
 RestartPreventExitStatus=1
 
-# Sandbox. It changes releases (rollback), the deploy log, its own database and the
-# dashboard (until that is retired); everything else is read-only.
+# Sandbox. It changes releases (rollback, upload), the deploy log and its own database;
+# everything else is read-only.
 ProtectSystem=strict
 ReadWritePaths=/sites /var/log /var/lib/mini-deploy
 # The GitHub token file (P3b): the only thing in /etc this service may write. "-" = skipped
@@ -59,9 +59,9 @@ SystemCallFilter=@system-service
 NoNewPrivileges=yes
 MemoryMax=512M
 TasksMax=256
-# Files it creates are owner-only (its database most of all). The ones it makes in /sites
-# (.hold, the dashboard's release) are root's 0600: fine, Caddy runs as root. If Caddy ever
-# runs as another user, loosen this around the dashboard refresh.
+# Files it creates are owner-only (its database most of all). Its marks in /sites (.hold)
+# are root's 0600: fine, Caddy runs as root. Uploaded sites get explicit modes (0644 files,
+# 0755 folders, set by upload.py), so they do not depend on this umask.
 UMask=0077
 
 [Install]

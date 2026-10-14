@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Stage 6 test: the pink glass sites deploy, the dashboard shows real data, nothing
-# phones home, and the look stays readable (contrast) and safe (no HTML injection).
-# Needs Docker and Caddy (current Caddyfile) running.
+# Stage 6 test: the pink glass sites deploy, the app list (dashboard.collect, shown on the
+# admin page) reads real data, nothing phones home, and the look stays readable (contrast)
+# and safe (no HTML injection). The Wi-Fi dashboard page is retired (2026-10-15); section 7
+# checks it stays gone. Needs Docker and Caddy (current Caddyfile) running.
 #
-# This DEPLOYS the three real apps: dashboard, demo-site and mini-deploy (the landing
-# page). They are meant to stay. It never deletes anything.
+# This DEPLOYS two test apps: demo-site and mini-deploy (the landing page), plus one
+# hooktest-<pid> app. It never deletes anything; remove them afterwards.
 set -uo pipefail
 
 REPO=/mnt/c/Users/indra/Code/mini-deploy
@@ -17,7 +18,7 @@ get()  { curl -s -m 5 -w ' [%{http_code}]' --resolve "$1.localhost:8080:127.0.0.
 code() { curl -s -m 5 -o /dev/null -w '%{http_code}' --resolve "$1.localhost:8080:127.0.0.1" "http://$1.localhost:8080${2:-/}"; }
 
 echo "== 1. the theme copies are in step with the source =="
-for f in web/dashboard/style.css web/landing/style.css web/logs/style.css examples/static-site/src/style.css; do
+for f in web/landing/style.css web/logs/style.css web/admin/style.css examples/static-site/src/style.css; do
   if cmp -s "$REPO/web/theme/pink.css" "$REPO/$f"; then ok "$f matches web/theme/pink.css"
   else bad "$f is stale: run scripts/sync-theme.sh"; fi
 done
@@ -53,7 +54,8 @@ for p in site_files:
         leaks.append(f"{p.relative_to(repo)}: import/preconnect")
 check(not leaks, "no external URLs, fonts, imports or preconnects" + (f" ({leaks})" if leaks else ""))
 
-for site in ("dashboard", "logs"):
+check(not (repo / "web/dashboard").exists(), "the retired Wi-Fi dashboard page is gone from web/")
+for site in ("logs",):
     js = (repo / f"web/{site}/app.js").read_text(encoding="utf-8")
     danger = [w for w in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function") if w in js]
     check(not danger, f"{site} JS never builds HTML from data" + (f" (found {danger})" if danger else ""))
@@ -124,7 +126,7 @@ sys.exit(1 if bad else 0)
 PY
 
 echo
-echo "== 2b. the three *-explained folders are complete, accurate and accessible =="
+echo "== 2b. the *-explained folders are complete, accurate and accessible =="
 REPO=$REPO python3 - <<'PY' || fail=1
 import html, json, os, re, sys
 from pathlib import Path
@@ -141,7 +143,8 @@ real_top = {"generated_at", "apps", "events", "attention"}
 real_app = {"name", "live", "held", "deployed", "total", "releases"}
 real_event = {"ts", "app", "action", "release", "result", "duration", "detail"}
 
-for name in ("dashboard-explained", "demo-site-explained", "landing-explained"):
+check(not (repo / "dashboard-explained").exists(), "the retired dashboard's guide folder is gone")
+for name in ("demo-site-explained", "landing-explained"):
     d = repo / name
     files = {p.name for p in d.iterdir()} if d.is_dir() else set()
     check({"index.html", "style.css", "explain.css", "README.md"} <= files, f"{name}: has index.html, style.css, explain.css, README.md")
@@ -185,8 +188,8 @@ sys.exit(1 if bad else 0)
 PY
 
 if exp=$(python3 "$REPO/scripts/export-diagrams.py" --out "$SRC/svg" 2>&1) \
-   && [ "$(ls "$SRC/svg"/*.svg 2>/dev/null | wc -l)" = 9 ]; then
-  ok "all 9 drawings export as standalone, well-formed .svg files (the Obsidian pictures)"
+   && [ "$(ls "$SRC/svg"/*.svg 2>/dev/null | wc -l)" = 6 ]; then
+  ok "all 6 drawings export as standalone, well-formed .svg files (the Obsidian pictures)"
 else
   bad "diagram export failed: $exp"
 fi
@@ -201,11 +204,13 @@ not a log line at all
 2026-10-12T01:00:07Z demo-site webhook - fail 0.2s xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 LOG
 mkdir -p "$SRC/sites/demo-site/releases"   # the fixture's app exists in a temp /sites, not the real one
-python3 "$REPO/scripts/dashboard.py" --out "$SRC/out" --log-file "$SRC/evil.log" --sites-root "$SRC/sites" >/dev/null
-SRC_OUT="$SRC/out" python3 - <<'PY' || fail=1
-import json, os, sys
+REPO=$REPO SRC=$SRC python3 - <<'PY' || fail=1
+import os, sys
 from pathlib import Path
-d = json.loads((Path(os.environ["SRC_OUT"]) / "data.json").read_text())
+sys.path.insert(0, os.environ["REPO"] + "/scripts")
+import dashboard   # the admin page shows exactly what collect() returns
+src = Path(os.environ["SRC"])
+d = dashboard.collect(src / "sites", src / "evil.log")
 bad = 0
 def check(ok, msg):
     global bad
@@ -235,12 +240,12 @@ def check(ok, msg):
     print(("ok    " if ok else "FAIL  ") + msg)
     bad += not ok
 root = Path(os.environ["SRC"]) / "fake-sites"
-for name in ("zeta", "demo-site", "feat-x--demo-site", "abc--demo-site", "other"):
+for name in ("zeta", "demo-site", "feat-x--demo-site", "abc--demo-site", "other", "dashboard"):
     (root / name / "releases").mkdir(parents=True)
 apps = dashboard.collect_apps(root)
 order = [a["name"] for a in apps]
 check(order == ["demo-site", "abc--demo-site", "feat-x--demo-site", "other", "zeta"],
-      f"each app is followed by its previews (got {order})")
+      f"each app is followed by its previews, and the old dashboard folder is not an app (got {order})")
 parents = {a["name"]: a["preview_of"] for a in apps}
 check(parents["feat-x--demo-site"] == "demo-site" and parents["demo-site"] is None, "previews name their parent, apps do not")
 check(dashboard.public_detail("webhook", "removed", "test/repo 0000000 remove 1111") == "",
@@ -249,27 +254,25 @@ sys.exit(1 if bad else 0)
 PY
 
 echo
-echo "== 4. deploy the three sites =="
+echo "== 4. deploy the two sites =="
 if python3 "$REPO/scripts/deploy.py" deploy mini-deploy "$REPO/web/landing" >/dev/null; then ok "landing deployed"; else bad "landing deploy failed"; fi
 if python3 "$REPO/scripts/build.py" build demo-site "$REPO/examples/static-site" >/dev/null 2>&1; then ok "demo-site built in Docker and deployed"; else bad "demo-site build failed"; fi
-if python3 "$REPO/scripts/dashboard.py" --force >/dev/null; then ok "dashboard deployed"; else bad "dashboard deploy failed"; fi
 
-for app in mini-deploy demo-site dashboard; do
+for app in mini-deploy demo-site; do
   [ "$(code $app /)" = 200 ] && ok "$app.localhost:8080 -> 200" || bad "$app did not answer 200"
   [ "$(code $app /style.css)" = 200 ] && ok "$app serves its stylesheet" || bad "$app has no style.css"
 done
 get demo-site / | grep -q 'built with node v' && ok "demo page was built (stamp present)" || bad "demo page has no build stamp"
 get demo-site / | grep -q '__BUILT' && bad "demo page has an unreplaced placeholder"
 get mini-deploy / | grep -q 'A small, self-hosted deploy platform' && ok "landing page content is there" || bad "landing page content missing"
-[ "$(code dashboard /data.json)" = 200 ] && ok "dashboard has data.json" || bad "no data.json"
 
 echo
-echo "== 5. the dashboard shows the real state =="
-curl -s -m 5 --resolve dashboard.localhost:8080:127.0.0.1 http://dashboard.localhost:8080/data.json > "$SRC/live.json"
-SRC_JSON="$SRC/live.json" python3 - <<'PY' || fail=1
-import json, os, sys
-from pathlib import Path
-d = json.loads(Path(os.environ["SRC_JSON"]).read_text())
+echo "== 5. the app list (what the admin page shows) matches the real state =="
+REPO=$REPO python3 - <<'PY' || fail=1
+import os, sys
+sys.path.insert(0, os.environ["REPO"] + "/scripts")
+import dashboard
+d = dashboard.collect()          # the real /sites and the real deploy log, read only
 bad = 0
 def check(ok, msg):
     global bad
@@ -285,27 +288,24 @@ for a in d["apps"]:
         break
 else:
     check(True, "every app has exactly one live marker, matching its link")
-check(all(e["app"] != "dashboard" for e in d["events"]), "the dashboard's own refreshes are left out of the activity")
+check(all(e["app"] != "dashboard" for e in d["events"]), "the old dashboard's refresh lines are left out of the activity")
+check("dashboard" not in {a["name"] for a in d["apps"]}, "the retired dashboard is not listed as an app")
 sys.exit(1 if bad else 0)
 PY
-before=$(ls -A /sites/dashboard/releases | grep -vc '^\.')
-python3 "$REPO/scripts/dashboard.py" | grep -q 'up to date' && ok "refresh with nothing new does not deploy" || bad "refresh deployed an identical dashboard"
-after=$(ls -A /sites/dashboard/releases | grep -vc '^\.')
-[ "$before" = "$after" ] && ok "no extra release was made" || bad "release count changed $before -> $after"
 
 echo
 echo "== 6. the phone address works too (nip.io name, LAN address) =="
 if ip -4 addr | grep -q 'inet 192\.168\.40\.241/'; then
-  phone=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Host: dashboard.192-168-40-241.nip.io:8080' http://192.168.40.241:8080/)
-  [ "$phone" = 200 ] && ok "dashboard.192-168-40-241.nip.io:8080 -> 200" || bad "phone-style host answered $phone"
+  phone=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Host: mini-deploy.192-168-40-241.nip.io:8080' http://192.168.40.241:8080/)
+  [ "$phone" = 200 ] && ok "mini-deploy.192-168-40-241.nip.io:8080 -> 200" || bad "phone-style host answered $phone"
   lanlogs=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -H 'Host: logs.localhost:8080' http://192.168.40.241:8080/)
   [ "$lanlogs" = 404 ] && ok "the build logs page is 404 from the Wi-Fi address" || bad "logs page answered $lanlogs on the Wi-Fi address"
 else
   echo "skip  phone checks: this PC is not on the home Wi-Fi (no 192.168.40.241), so there is nothing to reach"
 fi
-dot=$(curl -s -m 5 -o /dev/null -w '%{http_code}' --resolve dashboard.localhost:8080:127.0.0.1 http://dashboard.localhost:8080/.hidden)
+dot=$(curl -s -m 5 -o /dev/null -w '%{http_code}' --resolve mini-deploy.localhost:8080:127.0.0.1 http://mini-deploy.localhost:8080/.hidden)
 [ "$dot" = 404 ] && ok "dotfiles are still 404" || bad "dotfile answered $dot"
-for app in dashboard demo-site mini-deploy; do
+for app in demo-site mini-deploy; do
   for path in / /style.css; do
     curl -s -m 5 -I --resolve "$app.localhost:8080:127.0.0.1" "http://$app.localhost:8080$path" | grep -qi '^cache-control: no-cache' \
       && ok "$app$path is revalidated, so a deploy shows up at once" || bad "$app$path has no Cache-Control: no-cache"
@@ -316,49 +316,32 @@ curl -s -m 5 -I --resolve demo-site.localhost:8080:127.0.0.1 http://demo-site.lo
   && ok "apps are served with X-Content-Type-Options: nosniff" || bad "no nosniff header"
 
 echo
-echo "== 7. the refresh hooks really run (deploy, failure, rollback of the dashboard) =="
-# The other suites switch the hooks off. Here they are on, and nothing calls
-# dashboard.py by hand in between, so only the hooks can make these pass.
+echo "== 7. the Wi-Fi dashboard stays retired; 'needs a look' still works for the admin page =="
 HK=hooktest-$$
-live_json() { curl -s -m 5 --resolve dashboard.localhost:8080:127.0.0.1 http://dashboard.localhost:8080/data.json; }
-jq_py() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+listed() { REPO=$REPO python3 -c "import os,sys; sys.path.insert(0, os.environ['REPO'] + '/scripts'); import dashboard; d = dashboard.collect(); print($1)"; }
 mkdir -p "$SRC/hk-good"; echo '<h1>hook test</h1>' > "$SRC/hk-good/index.html"
 mkdir -p "$SRC/hk-bad"; echo hi > "$SRC/hk-bad/index.html"; echo 'TOKEN=abc' > "$SRC/hk-bad/.env"
 
 python3 "$REPO/scripts/deploy.py" deploy $HK "$SRC/hk-good" >/dev/null 2>&1
-live_json | jq_py "'$HK' in [a['name'] for a in d['apps']]" | grep -q True \
-  && ok "a deploy refreshed the dashboard by itself" || bad "new app did not appear after deploy"
+[ "$(listed "'$HK' in [a['name'] for a in d['apps']]")" = True ] && ok "a deployed app is in the app list" || bad "new app not listed"
+[ ! -e /sites/dashboard ] && ok "no deploy brings the Wi-Fi dashboard back (/sites/dashboard does not exist)" \
+  || bad "/sites/dashboard exists: something still publishes the retired page"
+[ "$(code dashboard /)" = 404 ] && ok "dashboard.localhost:8080 answers 404" || bad "dashboard.localhost:8080 answered $(code dashboard /)"
 
 python3 "$REPO/scripts/deploy.py" deploy $HK "$SRC/hk-bad" >/dev/null 2>&1 && bad "the .env deploy was accepted"
-live_json | jq_py "'$HK' in d['attention']" | grep -q True \
-  && ok "a FAILED deploy refreshed it too: the app needs a look" || bad "failure did not reach the dashboard"
-reason=$(live_json | jq_py "[e['detail'] for e in d['events'] if e['app']=='$HK' and e['result']=='fail'][-1]")
-[ "$reason" = "refused: unsafe file" ] && ok "the LAN sees only the reason: '$reason'" || bad "failure detail was: $reason"
+[ "$(listed "'$HK' in d['attention']")" = True ] && ok "a FAILED deploy: the app needs a look" || bad "failure not flagged"
+reason=$(listed "[e['detail'] for e in d['events'] if e['app']=='$HK' and e['result']=='fail'][-1]")
+[ "$reason" = "refused: unsafe file" ] && ok "the page shows only the reason: '$reason'" || bad "failure detail was: $reason"
 
 python3 "$REPO/scripts/deploy.py" deploy $HK "$SRC/hk-good" >/dev/null 2>&1
-live_json | jq_py "'$HK' in d['attention']" | grep -q False \
-  && ok "a later success clears 'needs a look'" || bad "attention did not clear"
+[ "$(listed "'$HK' in d['attention']")" = False ] && ok "a later success clears 'needs a look'" || bad "attention did not clear"
 
-# rolling the dashboard back is respected, and --force lifts the hold
-python3 "$REPO/scripts/deploy.py" rollback dashboard >/dev/null 2>&1
-held_at=$(readlink /sites/dashboard/current)
-python3 "$REPO/scripts/deploy.py" deploy $HK "$SRC/hk-good" >/dev/null 2>&1
-[ "$(readlink /sites/dashboard/current)" = "$held_at" ] && ok "a rolled-back dashboard stays rolled back" || bad "refresh undid the dashboard rollback"
-python3 "$REPO/scripts/dashboard.py" --force >/dev/null
-[ ! -e /sites/dashboard/.hold ] && [ "$(readlink /sites/dashboard/current)" != "$held_at" ] \
-  && ok "dashboard.py --force lifts the hold and refreshes" || bad "--force did not lift the hold"
-
-# the name is reserved, and test flags can never deploy test data
+# the name stays reserved, so an old bookmark can never open another app
 out=$(python3 "$REPO/scripts/deploy.py" deploy dashboard "$SRC/hk-good" 2>&1); rc=$?
 [ $rc = 1 ] && grep -q reserved <<<"$out" && ok "deploying to 'dashboard' by hand is refused" || bad "reserved name accepted: $out"
-out=$(python3 "$REPO/scripts/dashboard.py" --log-file "$SRC/evil.log" 2>&1); rc=$?
-[ $rc = 1 ] && ok "--log-file without --out is refused (test data never goes live)" || bad "--log-file deployed: $out"
-
-# two refreshes at once: both finish, one after the other
-python3 "$REPO/scripts/dashboard.py" --force >/dev/null 2>&1 & r1=$!
-python3 "$REPO/scripts/dashboard.py" --force >/dev/null 2>&1 & r2=$!
-wait $r1; a=$?; wait $r2; b=$?
-[ $a = 0 ] && [ $b = 0 ] && ok "two refreshes at once both finish (they take turns)" || bad "concurrent refresh exit codes $a $b"
+out=$(python3 "$REPO/scripts/deploy.py" deploy dashboard "$SRC/hk-good" --force 2>&1); rc=$?
+[ $rc = 1 ] && grep -q 'does not change' <<<"$out" && [ ! -e /sites/dashboard/releases ] \
+  && ok "--force cannot bring the dashboard back either" || bad "--force deployed to 'dashboard': $out"
 echo "      (left behind for you to remove: /sites/$HK and $SRC)"
 
 echo

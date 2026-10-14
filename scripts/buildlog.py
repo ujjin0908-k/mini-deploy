@@ -7,7 +7,7 @@ Each log starts with a few "key: value" header lines, then a blank line, then th
 build's own output. Build output is untrusted: escape codes and control characters
 are replaced before anything is written, so a build cannot fake lines or styling.
 These files are NEVER served to the Wi-Fi: Caddy shows them at logs.localhost only to
-requests from 127.0.0.1 (the dashboard, which the Wi-Fi can see, shows reason words only).
+requests from 127.0.0.1 (the admin page, also this PC only, shows reason words only).
 Standard library only.
 """
 

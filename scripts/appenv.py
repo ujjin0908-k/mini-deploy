@@ -9,7 +9,7 @@
     /etc/mini-deploy/apps/<app>.preview.json   what previews of <app> get (never the live values)
 
 The values go into the Docker build as environment variables and nowhere else: not into
-the release, not into the dashboard, not into a log. A secret (the default) is masked in
+the release, not into the admin page, not into a log. A secret (the default) is masked in
 build output and build logs, and a build whose dist/ contains a secret is refused. A value
 marked --public (an API address, a feature flag) may appear in the site and is not masked.
 

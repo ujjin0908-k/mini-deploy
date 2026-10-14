@@ -408,7 +408,7 @@ def _build_locked(app, root, repo, image, install_scripts, capture, info=None, r
             # really belongs in the page).
             leaked = find_secret(dist, forms)
             if leaked:
-                # The key name goes after "nothing was deployed:", so the dashboard and the
+                # The key name goes after "nothing was deployed:", so the admin page and the
                 # log header (which cut there) show only the reason.
                 raise BuildError(f"a secret appears in dist/; nothing was deployed: {leaked} "
                                  f"(if it is not secret: appenv.py set ... {leaked} --public)")
@@ -450,7 +450,6 @@ def main():
         rc = 1
     else:
         deploy_mod.log_event(args.app, "build", None, "ok", started)
-    deploy_mod._refresh_dashboard(args.app)  # after failures too; never turns into an error
     return rc
 
 
