@@ -17,6 +17,10 @@
 Description=Caddy for mini-deploy (127.0.0.1:8080, plus the home Wi-Fi only at home)
 After=network-online.target
 Wants=network-online.target
+# The phone listener (P5) uses Tailscale's address: start after tailscaled when it is there,
+# so it is open at once after a boot. Wants, never Requires: no Tailscale must never stop Caddy.
+After=tailscaled.service
+Wants=tailscaled.service
 # The Caddyfile, the start script and the logs page live on /mnt/c (Windows drive).
 RequiresMountsFor=/mnt/c/Users/indra/Code/mini-deploy
 # The apt package's caddy.service would fight over the admin socket: never both.

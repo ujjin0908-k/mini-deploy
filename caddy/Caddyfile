@@ -1,6 +1,7 @@
 # Stage 2/3B: one server, many sites. The first label of the Host picks the folder.
 # Runs as the systemd service mini-deploy-caddy (systemd/mini-deploy-caddy.service),
-# started through scripts/run-caddy.sh, which decides whether to listen on the Wi-Fi.
+# started through scripts/run-caddy.sh, which decides whether to listen on the Wi-Fi
+# (at home only) and on the Tailscale network (while Tailscale is up; P5, below).
 # Apply changes without a restart: systemctl reload mini-deploy-caddy
 
 {
@@ -8,6 +9,49 @@
     # 127.0.0.1:2019 with no password, and in mirrored WSL networking any Windows
     # process shares that loopback. A unix socket is only reachable as root in WSL.
     admin unix//run/caddy-admin.sock
+    # The phone sites below use HTTPS. Caddy would also open port 80 on every address to
+    # redirect http to https there; nothing here may listen on all addresses, so no.
+    auto_https disable_redirects
+}
+
+# P5: an app on the phone from anywhere, over the owner's own Tailscale network only.
+# Tailscale gives this machine ONE certificate name (mini-deploy.tail206989.ts.net: no
+# app.<name> subdomains), so each app gets its own port. Caddy asks the local tailscaled
+# for that certificate (free, Let's Encrypt, renewed by itself). Port 443 on that name is
+# the Funnel's (/webhook only), so apps start at 8443.
+# Listens on 127.0.0.1 and, only while Tailscale is up, on the tailnet address that
+# scripts/run-caddy.sh puts in MINI_DEPLOY_TAILNET_BIND: never on the Wi-Fi, never on
+# 0.0.0.0. No proxy sits in front, so the connection's own address is the phone's: the
+# admin and logs gates of :8080 are untouched, and neither page is served here at all.
+# RULE: never `tailscale funnel` or `tailscale serve` on 8443 and up: that would put a phone
+# app on the public internet (and fight Caddy for the port).
+(phone_app) {
+    bind 127.0.0.1 {$MINI_DEPLOY_TAILNET_BIND}
+    tls {
+        get_certificate tailscale
+    }
+    handle {
+        # Cheaper Inference, exactly as on :8080 (the app calls /api/ci/... on its own origin)
+        handle /api/ci/* {
+            reverse_proxy 127.0.0.1:9200
+        }
+        @dotfile path_regexp (^|/)\.
+        respond @dotfile 404
+        header {
+            Cache-Control "no-cache"
+            X-Content-Type-Options "nosniff"
+            # the phone address never leaks to the sites a page links to
+            Referrer-Policy "no-referrer"
+        }
+        root * /sites/{args[0]}/current
+        file_server
+    }
+}
+
+# One line per app: its own port (the next free one). The admin page reads these lines to
+# show each app's "phone (anywhere)" address, so keep this exact two-line shape.
+https://mini-deploy.tail206989.ts.net:8443 {
+    import phone_app aftersleep
 }
 
 # Leading ":" = no hostname, so no HTTPS/certificate logic. Plain HTTP on 8080.

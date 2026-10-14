@@ -7,6 +7,7 @@
   // The only two address shapes a link may have (checked again here, not trusted).
   var PC_URL_RE = /^http:\/\/[a-z0-9-]{1,40}\.localhost:8080\/$/;
   var PHONE_URL_RE = /^http:\/\/[a-z0-9-]{1,40}\.[0-9]{1,3}(-[0-9]{1,3}){3}\.nip\.io:8080\/$/;
+  var TAILNET_URL_RE = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.ts\.net:[0-9]{4,5}\/$/;   // P5
   var csrf = null;
   var timer = null;
 
@@ -179,6 +180,13 @@
     } else {
       links.appendChild(el("p", "muted small",
         atHome ? "phone address: not available" : "phone address: shown when this PC is on your home Wi-Fi"));
+    }
+    if (typeof app.tailnet_url === "string" && TAILNET_URL_RE.test(app.tailnet_url)) {
+      links.appendChild(el("p", "muted small", "phone, anywhere (Tailscale on, on the phone):"));
+      var anywhere = el("div", "address");
+      anywhere.appendChild(el("code", "mono", app.tailnet_url));
+      anywhere.appendChild(copyButton(app.tailnet_url));
+      links.appendChild(anywhere);
     }
     card.appendChild(links);
 

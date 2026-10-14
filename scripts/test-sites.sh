@@ -423,7 +423,8 @@ MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.broken" $RC reload >/dev/null 2>&1 && bad 
 [ "$(code demo-site /)" = 200 ] && ok "and Caddy keeps serving with its old config" || bad "sites went down after a failed reload"
 if [ -f "$HL" ]; then
   cp -p "$HL" "$SRC/home-lan.real2"
-  systemctl stop mini-deploy-caddy-sync.timer   # the real timer would clear the mark meanwhile
+  # the real timer would clear the mark meanwhile; a run already going would hold the sync lock
+  systemctl stop mini-deploy-caddy-sync.timer mini-deploy-caddy-sync.service
   trap 'cp -p "$SRC/home-lan.real2" "$HL"; rm -f /run/mini-deploy-caddy-sync.failed; $RC sync >/dev/null 2>&1; systemctl start mini-deploy-caddy-sync.timer' EXIT
   sed -i 's/^GATEWAY_MAC=.*/GATEWAY_MAC=02:00:00:00:00:01/' "$HL"       # forces "needs a reload"
   MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.broken" $RC sync >/dev/null 2>&1
@@ -434,8 +435,90 @@ if [ -f "$HL" ]; then
   $RC sync >/dev/null 2>&1; systemctl start mini-deploy-caddy-sync.timer; sleep 1
   [ -n "$(lan_of)" ] && ok "with the real config back, the home Wi-Fi side is restored" || bad "Wi-Fi side not restored"
 fi
-noenv=$(MINI_DEPLOY_LAN_BIND= caddy adapt --adapter caddyfile --config "$REPO/caddy/Caddyfile" 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.stdin)["apps"]["http"]["servers"]; print(sorted({l for v in s.values() for l in v["listen"]}))')
-[ "$noenv" = "['127.0.0.1:8080']" ] && ok "with no home address the config is loopback only: $noenv" || bad "empty home address gives listeners $noenv"
+noenv=$(MINI_DEPLOY_LAN_BIND= MINI_DEPLOY_TAILNET_BIND= caddy adapt --adapter caddyfile --config "$REPO/caddy/Caddyfile" 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.stdin)["apps"]["http"]["servers"]; print(sorted({l for v in s.values() for l in v["listen"]}))')
+[ "$noenv" = "['127.0.0.1:8080', '127.0.0.1:8443']" ] && ok "with no home and no Tailscale address the config is loopback only: $noenv" || bad "empty addresses give listeners $noenv"
+
+echo
+echo "== 10. phone from anywhere (P5): HTTPS on the Tailscale address, After Sleep only =="
+TN=mini-deploy.tail206989.ts.net
+TA=$(ip -4 -o addr show dev tailscale0 2>/dev/null | sed -n 's/.* inet \([0-9.]*\)\/32 .*/\1/p' | head -1)
+tget() { curl -sS -m 5 --resolve "$TN:8443:$TA" "$@"; }
+if [ -z "$TA" ]; then
+  echo "skip  Tailscale is not up on this PC: nothing to reach"
+else
+  both=$(printf '%s\n' "127.0.0.1:8443" "$TA:8443" | sort | tr '\n' ' ')
+  have=$(ss -ltnH 'sport = :8443' | awk '{print $4}' | sort | tr '\n' ' ')
+  [ "$have" = "$both" ] && ok "8443 listens only on this PC and the Tailscale address ($have)" || bad "8443 listens on: $have"
+  st=$(tget -o "$SRC/tn-root" -w '%{http_code} %{ssl_verify_result}' "https://$TN:8443/")
+  [ "$st" = "200 0" ] && ok "After Sleep over Tailscale: 200 with a valid certificate (checked by curl)" || bad "root answered '$st'"
+  head -c 300 /sites/aftersleep/current/index.html > "$SRC/tn-want"; head -c 300 "$SRC/tn-root" > "$SRC/tn-got"
+  cmp -s "$SRC/tn-want" "$SRC/tn-got" && ok "it is the live After Sleep release" || bad "the page is not After Sleep's live index.html"
+  issuer=$(echo | openssl s_client -connect "$TA:8443" -servername "$TN" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null)
+  grep -q "Let's Encrypt" <<<"$issuer" && ok "the certificate is Let's Encrypt's, via Tailscale ($issuer)" || bad "certificate issuer: $issuer"
+  for h in admin.localhost:8080 logs.localhost:8080 aftersleep.localhost:8080; do
+    body=$(tget -H "Host: $h" "https://$TN:8443/")
+    [ -z "$body" ] && ok "Host $h on this listener gets nothing (admin and logs are never served here)" || bad "Host $h got a page"
+  done
+  out=$(curl -sS -m 5 -k --resolve "other.tail206989.ts.net:8443:$TA" https://other.tail206989.ts.net:8443/ 2>&1)
+  grep -q 'alert' <<<"$out" && ok "another certificate name is refused in the handshake" || bad "another name was served: $out"
+  for p in /.env /.git/config /.hidden/x; do
+    c=$(tget -o /dev/null -w '%{http_code}' "https://$TN:8443$p")
+    [ "$c" = 404 ] && ok "$p is 404" || bad "$p answered $c"
+  done
+  [ "$(tget "https://$TN:8443/api/ci/v1/evil")" = "not found" ] && ok "/api/ci reaches the forwarder (its own 404 text)" || bad "/api/ci did not reach the forwarder"
+  [ "$(tget -o /dev/null -w '%{http_code}' "https://$TN:8443/no-such-file")" = 404 ] && ok "a missing file is 404" || bad "missing file not 404"
+  tget -sI "https://$TN:8443/" | grep -qi '^cache-control: no-cache' && ok "no-cache, so a deploy shows at once" || bad "no Cache-Control: no-cache"
+  c=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://$TA:8080/"); [ "$c" = 000 ] && ok "port 8080 is closed on the Tailscale address" || bad "8080 answered $c on Tailscale"
+  c=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "http://$TA:80/"); [ "$c" = 000 ] && ok "port 80 is closed on the Tailscale address (no http->https redirect server)" || bad "80 answered $c on Tailscale"
+
+  # Tailscale goes away -> the listener closes by itself; comes back -> it reopens. Simulated with
+  # an interface name that does not exist; the real timer is stopped meanwhile (it would undo it).
+  RC="bash $REPO/scripts/run-caddy.sh"
+  MARK=/run/mini-deploy-caddy-sync.failed
+  # The timer AND a run of it that may already be going: either could undo what is simulated here.
+  systemctl stop mini-deploy-caddy-sync.timer mini-deploy-caddy-sync.service
+  trap 'rm -f $MARK; $RC sync >/dev/null 2>&1; systemctl start mini-deploy-caddy-sync.timer' EXIT
+  MINI_DEPLOY_TAILNET_DEV=no-such-dev $RC sync >/dev/null 2>&1; sleep 1
+  have=$(ss -ltnH 'sport = :8443' | awk '{print $4}' | tr '\n' ' ')
+  [ "$have" = "127.0.0.1:8443 " ] && ok "Tailscale gone: the phone listener closes by itself (this PC only)" || bad "still listening on: $have"
+  [ "$(code aftersleep /)" = 200 ] && ok "and the sites on this PC keep working meanwhile" || bad "sites broke while Tailscale was gone"
+  $RC sync >/dev/null 2>&1; sleep 1
+  have=$(ss -ltnH 'sport = :8443' | awk '{print $4}' | sort | tr '\n' ' ')
+  [ "$have" = "$both" ] && ok "Tailscale back: the phone listener reopens by itself" || bad "not reopened: $have"
+
+  # A phone site taken out of the Caddyfile: its port is simply not checked, so no endless reloads.
+  grep -v '^https://.*\.ts\.net:8443 {' "$REPO/caddy/Caddyfile" | grep -v 'import phone_app aftersleep' > "$SRC/Caddyfile.nophone"
+  out=$(MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.nophone" $RC sync 2>&1); rc=$?
+  [ $rc = 0 ] && [ -z "$out" ] && ok "no phone site in the Caddyfile: the sync finds nothing to do (no reload loop)" || bad "sync with no phone site: rc $rc, '$out'"
+
+  # A reload that "works" but leaves the wrong listeners must back off, not reload every 30 s.
+  # (A copy whose phone site has no Tailscale bind: Caddy reloads fine and still is not there.)
+  sed 's/bind 127\.0\.0\.1 {\$MINI_DEPLOY_TAILNET_BIND}/bind 127.0.0.1/' "$REPO/caddy/Caddyfile" > "$SRC/Caddyfile.notail"
+  MINI_DEPLOY_TAILNET_DEV=no-such-dev $RC sync >/dev/null 2>&1; sleep 1   # first: closed, so a reload is due
+  rm -f $MARK
+  out=$(MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.notail" $RC sync 2>&1); rc=$?
+  [ $rc = 1 ] && [ -f $MARK ] && grep -q 'reloaded, but' <<<"$out" && ok "a reload that leaves the wrong listeners is caught and marked" || bad "not caught: rc $rc, '$out'"
+  out=$(MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.notail" $RC sync 2>&1); rc=$?
+  [ $rc = 0 ] && [ -z "$out" ] && ok "and the next check backs off instead of reloading again" || bad "no back-off: rc $rc, '$out'"
+  rm -f $MARK; $RC sync >/dev/null 2>&1; sleep 1
+  have=$(ss -ltnH 'sport = :8443' | awk '{print $4}' | sort | tr '\n' ' ')
+  [ "$have" = "$both" ] && ok "with the real Caddyfile the phone listener is back" || bad "not restored: $have"
+  systemctl start mini-deploy-caddy-sync.timer; trap - EXIT
+
+  # A phone port another program holds: Caddy would start without that site, never without this PC's
+  # sites. Checked on a copy with port 18443 (`check-start` starts nothing).
+  sed 's/:8443 {/:18443 {/' "$REPO/caddy/Caddyfile" > "$SRC/Caddyfile.port"
+  out=$(MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.port" $RC check-start 2>&1)
+  grep -q '^taken phone ports: none$' <<<"$out" && ok "a free phone port is seen as free" || bad "free port check: $out"
+  python3 -c 'import socket, time; s = socket.socket(); s.bind(("127.0.0.1", 18443)); s.listen(); time.sleep(6)' & holder=$!
+  sleep 1
+  out=$(MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.port" $RC check-start 2>&1)
+  kill $holder 2>/dev/null; wait $holder 2>/dev/null
+  grep -q '^taken phone ports: 18443$' <<<"$out" && ok "a phone port another program holds is seen before Caddy starts" || bad "taken port not seen: $out"
+  fb=$(sed -n 's/^fallback listens on: //p' <<<"$out")
+  grep -q '127.0.0.1:8080' <<<"$fb" && ! grep -q ':18443' <<<"$fb" \
+    && ok "then Caddy starts without that site and keeps this PC's sites ($fb)" || bad "fallback listens on: $fb"
+fi
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi

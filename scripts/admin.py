@@ -55,6 +55,11 @@ LISTEN = ("127.0.0.1", 9300)
 HOST = "admin.localhost:8080"
 ORIGIN = "http://" + HOST
 HOME_FILE = Path("/etc/mini-deploy/home-lan")
+CADDYFILE = REPO_ROOT / "caddy" / "Caddyfile"
+# P5: "https://<machine>.ts.net:<port> {" followed by "import phone_app <app>" in the Caddyfile.
+# The Caddyfile is the one place that says which app has which phone address.
+PHONE_SITE_RE = re.compile(r"^https://([a-z0-9-]+(?:\.[a-z0-9-]+)*\.ts\.net):([0-9]{4,5}) \{\r?\n"
+                           r"[ \t]*import phone_app ([a-z0-9-]{1,40})[ \t]*\r?$", re.M)
 
 # __Host-: the browser only accepts it with Secure, Path=/ and no Domain, so no other name
 # (and no other port's service on this name) can plant or share it.
@@ -192,6 +197,15 @@ def phone_base():
     return m.group(1).replace(".", "-") + ".nip.io:8080"
 
 
+def tailnet_urls():
+    """app -> its "phone, anywhere" address over Tailscale (P5), read from the Caddyfile."""
+    try:
+        text = CADDYFILE.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return {}
+    return {m.group(3): f"https://{m.group(1)}:{m.group(2)}/" for m in PHONE_SITE_RE.finditer(text)}
+
+
 def state():
     data = dashboard_mod.collect()
     # Recent deploys: only apps that exist now, plus the webhook's own lines. The test suites
@@ -199,9 +213,11 @@ def state():
     present = {a["name"] for a in data["apps"]}
     data["events"] = [e for e in data["events"] if e["app"] in present or e["app"] == "webhook"]
     base = phone_base()
+    tailnet = tailnet_urls()
     for app in data["apps"]:
         app["pc_url"] = f"http://{app['name']}.localhost:8080/"
         app["phone_url"] = f"http://{app['name']}.{base}/" if base else None
+        app["tailnet_url"] = tailnet.get(app["name"])
     with db() as conn:
         rows = conn.execute("SELECT ts, action, app, result FROM audit ORDER BY id DESC LIMIT 50").fetchall()
     data["audit"] = [{"ts": r[0], "action": r[1], "app": r[2], "result": r[3]} for r in rows]

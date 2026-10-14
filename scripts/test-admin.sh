@@ -538,6 +538,38 @@ sys.exit(1 if bad_count else 0)
 PY
 
 echo
+echo "== 1c. the phone-anywhere addresses come from the Caddyfile (P5) =="
+python3 - <<'PY' || fail=1
+import sys, tempfile
+from pathlib import Path
+sys.path.insert(0, "/mnt/c/Users/indra/Code/mini-deploy/scripts")
+import admin
+bad = 0
+def check(ok, msg):
+    global bad
+    print(("ok    " if ok else "FAIL  ") + msg)
+    bad += not ok
+real = admin.tailnet_urls()
+check(real.get("aftersleep") == "https://mini-deploy.tail206989.ts.net:8443/",
+      f"the real Caddyfile gives After Sleep its address ({real})")
+tmp = Path(tempfile.mkdtemp(prefix="mini-deploy-admintest-caddy-"))   # removed by hand
+(tmp / "Caddyfile").write_text(
+    "https://box.tail1.ts.net:8443 {\r\n    import phone_app one\r\n}\r\n"     # CRLF (a Windows checkout)
+    "https://box.tail1.ts.net:8444 {\n    import phone_app Two\n}\n"          # bad app name
+    "http://box.tail1.ts.net:8445 {\n    import phone_app three\n}\n"         # not https
+    "https://box.example.com:8446 {\n    import phone_app four\n}\n"          # not a ts.net name
+    "https://box.tail1.ts.net:8447 {\n    respond hi\n    import phone_app five\n}\n"   # not the two-line shape
+    "https://box.tail1.ts.net:8448 {\n    import phone_app six\n}\n")
+admin.CADDYFILE = tmp / "Caddyfile"
+got = admin.tailnet_urls()
+check(got == {"one": "https://box.tail1.ts.net:8443/", "six": "https://box.tail1.ts.net:8448/"},
+      f"only well-formed https *.ts.net lines with a valid app name count ({got})")
+admin.CADDYFILE = tmp / "missing"
+check(admin.tailnet_urls() == {}, "no Caddyfile: no addresses, no error")
+sys.exit(1 if bad else 0)
+PY
+
+echo
 echo "== 2. Caddy's gate in front of the real service =="
 systemctl is-active --quiet mini-deploy-admin && ok "mini-deploy-admin is running" || bad "mini-deploy-admin is not running"
 code() { curl -s -o /dev/null -w "%{http_code}" -m 5 "$@"; }
