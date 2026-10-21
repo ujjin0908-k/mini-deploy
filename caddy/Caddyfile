@@ -54,6 +54,10 @@ https://mini-deploy.tail206989.ts.net:8443 {
     import phone_app aftersleep
 }
 
+https://mini-deploy.tail206989.ts.net:8444 {
+    import phone_app yoomiread
+}
+
 # Leading ":" = no hostname, so no HTTPS/certificate logic. Plain HTTP on 8080.
 :8080 {
     # Who can connect: this machine always; the home Wi-Fi address only when we are

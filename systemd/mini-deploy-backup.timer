@@ -1,0 +1,11 @@
+# Weekly backup. Persistent: if the PC was off at that time, it runs soon after the next start.
+[Unit]
+Description=mini-deploy: weekly secret-free backup
+
+[Timer]
+OnCalendar=Sun 12:00
+Persistent=true
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

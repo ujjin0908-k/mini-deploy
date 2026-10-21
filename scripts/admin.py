@@ -47,6 +47,7 @@ import deploy as deploy_mod        # rollback, rollforward, unhold: the same cod
 import dashboard as dashboard_mod  # the app list and recent activity
 import repos as repos_mod          # GitHub repos connected from this page, and the token
 import upload as upload_mod        # checks and unpacks an uploaded .zip (P4)
+import backup as backup_mod        # only read_status(): when the weekly backup last worked (P6)
 from admindb import DB_PATH, audit, db  # the database file (shared with the webhook)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -227,6 +228,7 @@ def state():
         data["repos"] = repos_mod.list_repos(conn)
     data["hook_base"] = repos_mod.hook_base()
     data["token"] = repos_mod.token_status()   # "set" / "not set" / "check the file": never the value
+    data["backup"] = backup_mod.read_status()  # a failed or missing weekly backup must not stay silent
     return data
 
 

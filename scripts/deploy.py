@@ -239,6 +239,19 @@ def clear_hold(root):
 
 # ---------------------------------------------------------------- logging
 
+LOG_MODE = 0o640   # root reads and writes; nobody else needs the deploy log
+
+
+def append_private(path, line, mode):
+    """Append one line to a file that only root may read (created with `mode`, an older
+    wider file is narrowed). A link in its place is refused, never followed."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+    with os.fdopen(fd, "a", encoding="ascii") as fh:
+        if stat.S_IMODE(os.fstat(fd).st_mode) & ~mode:
+            os.fchmod(fd, mode)
+        fh.write(line + "\n")
+
+
 def log_event(app, action, release, result, started, detail=""):
     """One line per event: time, app, action, release, result, duration, detail."""
     safe_app = app if APP_RE.fullmatch(app) else "invalid-name"
@@ -249,8 +262,7 @@ def log_event(app, action, release, result, started, detail=""):
     if detail:  # printable ASCII only, so a message can never forge a second log line
         line += " " + re.sub(r"[^\x20-\x7e]", "?", detail)[:300]
     try:
-        with open(LOG_FILE, "a", encoding="ascii") as fh:
-            fh.write(line + "\n")
+        append_private(LOG_FILE, line, LOG_MODE)
     except OSError as e:
         print(f"warning: could not write {LOG_FILE}: {e}", file=sys.stderr)
 
@@ -329,14 +341,18 @@ def check_tree(path, label):
 
 
 def strip_special_modes(path):
-    """Drop setuid, setgid and sticky bits from the copy. copytree keeps modes, and a
-    build must not be able to plant a setuid file under /sites."""
+    """Drop setuid, setgid and sticky bits, and write access for group and others, from the
+    copy. copytree keeps modes: a build must not plant a setuid file under /sites, and a
+    folder copied from C: (where everything shows as 777) must not stay writable by all."""
     for dirpath, dirnames, filenames in os.walk(path):
         for name in dirnames + filenames:
             full = os.path.join(dirpath, name)
             mode = stat.S_IMODE(os.lstat(full).st_mode)
-            if mode & 0o7000:
-                os.chmod(full, mode & 0o0777)
+            if mode & ~0o755:
+                os.chmod(full, mode & 0o755)
+    mode = stat.S_IMODE(os.lstat(path).st_mode)   # the release folder itself
+    if mode & ~0o755:
+        os.chmod(path, mode & 0o755)
 
 
 # ---------------------------------------------------------------- release handling

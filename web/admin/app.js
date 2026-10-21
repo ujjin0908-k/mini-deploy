@@ -211,13 +211,25 @@
 
   function render(data) {
     var attention = data.attention || [];
-    var needs = attention.length > 0;
+    var backup = data.backup || { stale: true };
+    var needs = attention.length > 0 || backup.stale === true;
     $("overall").setAttribute("data-state", needs ? "attention" : "ok");
     $("overall").textContent = needs ? "needs a look" : "all good";
     $("updated").textContent = "updated " + when(data.generated_at);
     $("home-note").textContent = data.at_home
       ? "This PC is on your home Wi-Fi: the phone addresses below work there."
       : "This PC is not on your home Wi-Fi right now, so phone addresses are hidden.";
+    // The weekly backup (OneDrive). A failed run or none for 8 days asks for a look.
+    var note = $("backup-note");
+    if (backup.stale) {
+      note.className = "small result-bad";
+      note.textContent = (backup.last_result === "fail" ? "The last backup failed" : "No backup for over a week")
+        + (backup.last_ok ? " (last good one " + when(backup.last_ok) + ")" : " (none yet)")
+        + ": in WSL, journalctl -u mini-deploy-backup";
+    } else {
+      note.className = "muted small";
+      note.textContent = "Last backup " + when(backup.last_ok) + " (OneDrive, no secrets inside).";
+    }
 
     knownApps = data.apps.map(function (a) { return a.name; });
     var apps = $("apps");

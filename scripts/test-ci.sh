@@ -51,7 +51,7 @@ class Up(BaseHTTPRequestHandler):
 up = ThreadingHTTPServer(("127.0.0.1", 9301), Up)
 threading.Thread(target=up.serve_forever, daemon=True).start()
 
-fw = ThreadingHTTPServer(("127.0.0.1", 9302), cf.Handler)
+fw = cf.Server(("127.0.0.1", 9302), cf.Handler)
 threading.Thread(target=fw.serve_forever, daemon=True).start()
 BASE = "http://127.0.0.1:9302"
 
@@ -140,7 +140,51 @@ st, txt, _ = call("GET", "/api/ci/v1/models")
 check(st == 502, f"upstream down: 502 (got {st})")
 cf.save_upstream("http://127.0.0.1:9301")
 
-# 11. the key never reaches the log
+# 11. slow or silent connections: bounded in time and in number (a second server with
+# small limits, so the test is quick: 2 s per read, 2 connections at once)
+import socket, time
+class QuickHandler(cf.Handler):
+    timeout = 2
+small = cf.Server(("127.0.0.1", 9303), QuickHandler)
+small.slots = threading.BoundedSemaphore(2)
+threading.Thread(target=small.serve_forever, daemon=True).start()
+quiet = [socket.create_connection(("127.0.0.1", 9303), timeout=10) for _ in range(2)]   # send nothing
+time.sleep(0.3)
+extra = socket.create_connection(("127.0.0.1", 9303), timeout=10)
+extra.sendall(b"GET /api/ci/v1/models HTTP/1.0\r\n\r\n")
+got = extra.recv(200); extra.close()
+check(got.startswith(b"HTTP/1.0 503"), f"a connection over the cap gets 503 at once (got {got[:30]!r})")
+started = time.monotonic()
+closed = all(s.recv(10) == b"" for s in quiet)   # the server closes a silent connection
+took = time.monotonic() - started
+check(closed and took < 6, f"silent connections are closed after the read timeout ({took:.1f}s)")
+for s in quiet: s.close()
+# a thread that cannot start must give its slot back (16 such failures would 503 forever)
+import socketserver
+real_pr = socketserver.ThreadingMixIn.process_request
+def no_thread(self, request, client_address):
+    raise RuntimeError("can't start new thread")
+socketserver.ThreadingMixIn.process_request = no_thread
+before = small.slots._value
+try:
+    small.process_request(socket.socket(), ("127.0.0.1", 0))
+except RuntimeError:
+    pass
+socketserver.ThreadingMixIn.process_request = real_pr
+check(small.slots._value == before, f"a thread that cannot start gives its slot back ({before} -> {small.slots._value})")
+try:   # what a timed-out connection logs: it has no request line yet
+    with contextlib.redirect_stdout(io.StringIO()):
+        cf.Handler.__new__(cf.Handler).log_message("Request timed out: %r", "x")
+    check(True, "a timed-out connection logs one line, no crash")
+except Exception as e:
+    check(False, f"a timed-out connection crashes the log line ({type(e).__name__})")
+time.sleep(0.3)
+c2 = socket.create_connection(("127.0.0.1", 9303), timeout=10)
+c2.sendall(b"GET /api/ci/v1/models HTTP/1.0\r\n\r\n")
+got = c2.recv(200); c2.close()
+check(got.startswith(b"HTTP/1.0 200"), f"after they are gone, a normal call works again (got {got[:30]!r})")
+
+# 12. the key never reaches the log
 check(KEY not in log.getvalue(), "the key is not in the forwarder's log")
 print("log sample:", log.getvalue().strip().splitlines()[:2])
 sys.exit(1 if bad_count else 0)

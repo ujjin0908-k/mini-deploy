@@ -436,7 +436,10 @@ if [ -f "$HL" ]; then
   [ -n "$(lan_of)" ] && ok "with the real config back, the home Wi-Fi side is restored" || bad "Wi-Fi side not restored"
 fi
 noenv=$(MINI_DEPLOY_LAN_BIND= MINI_DEPLOY_TAILNET_BIND= caddy adapt --adapter caddyfile --config "$REPO/caddy/Caddyfile" 2>/dev/null | python3 -c 'import json,sys; s=json.load(sys.stdin)["apps"]["http"]["servers"]; print(sorted({l for v in s.values() for l in v["listen"]}))')
-[ "$noenv" = "['127.0.0.1:8080', '127.0.0.1:8443']" ] && ok "with no home and no Tailscale address the config is loopback only: $noenv" || bad "empty addresses give listeners $noenv"
+# expected: 8080 plus every phone port the Caddyfile has (8443 After Sleep, 8444 YoomiRead, ...), loopback only
+want=$(sed -n 's/^https:\/\/[^ ]*\.ts\.net:\([0-9]*\) {$/\1/p' "$REPO/caddy/Caddyfile" \
+  | python3 -c 'import sys; print(sorted({"127.0.0.1:8080"} | {"127.0.0.1:" + p.strip() for p in sys.stdin if p.strip()}))')
+[ "$noenv" = "$want" ] && ok "with no home and no Tailscale address the config is loopback only: $noenv" || bad "empty addresses give listeners $noenv (want $want)"
 
 echo
 echo "== 10. phone from anywhere (P5): HTTPS on the Tailscale address, After Sleep only =="
@@ -506,8 +509,10 @@ else
   systemctl start mini-deploy-caddy-sync.timer; trap - EXIT
 
   # A phone port another program holds: Caddy would start without that site, never without this PC's
-  # sites. Checked on a copy with port 18443 (`check-start` starts nothing).
-  sed 's/:8443 {/:18443 {/' "$REPO/caddy/Caddyfile" > "$SRC/Caddyfile.port"
+  # sites. Checked on a copy where EVERY phone port is moved up by 10000 (8443 -> 18443, 8444 ->
+  # 18444): the live Caddy holds the real ones, so a copy keeping any of them would see it "taken".
+  # (`check-start` starts nothing.)
+  sed -E 's/^(https:\/\/[^ ]*\.ts\.net:)(8[0-9]{3}) \{$/\11\2 {/' "$REPO/caddy/Caddyfile" > "$SRC/Caddyfile.port"
   out=$(MINI_DEPLOY_CADDYFILE="$SRC/Caddyfile.port" $RC check-start 2>&1)
   grep -q '^taken phone ports: none$' <<<"$out" && ok "a free phone port is seen as free" || bad "free port check: $out"
   python3 -c 'import socket, time; s = socket.socket(); s.bind(("127.0.0.1", 18443)); s.listen(); time.sleep(6)' & holder=$!

@@ -113,6 +113,8 @@ echo '<h1>dots</h1>' > "$SRC/dots/index.html"
 echo secret > "$SRC/dots/.hidden-file"
 echo secret > "$SRC/dots/.hiddendir/inner.txt"
 echo bin > "$SRC/dots/suid.bin"; chmod 4755 "$SRC/dots/suid.bin"
+mkdir -p "$SRC/dots/open"; echo x > "$SRC/dots/open/all.txt"   # like a folder copied from C:
+chmod 777 "$SRC/dots" "$SRC/dots/open"; chmod 666 "$SRC/dots/open/all.txt"
 $DEPLOY deploy $DOTS "$SRC/dots" >/dev/null
 for p in /index.html /.hidden-file /.hiddendir/inner.txt /%2ehidden-file; do
   want=404; [ "$p" = /index.html ] && want=200
@@ -121,6 +123,8 @@ for p in /index.html /.hidden-file /.hiddendir/inner.txt /%2ehidden-file; do
 done
 mode=$(stat -c %a "/sites/$DOTS/current/suid.bin")
 [ "$mode" = 755 ] && ok "setuid bit stripped (mode $mode)" || bad "mode is $mode"
+modes="$(stat -L -c %a "/sites/$DOTS/current") $(stat -c %a "/sites/$DOTS/current/open") $(stat -c %a "/sites/$DOTS/current/open/all.txt")"
+[ "$modes" = "755 755 644" ] && ok "nothing in a release is writable by others (got $modes)" || bad "release modes: $modes"
 
 echo
 echo "== 5. prune keeps 5 and the live one, ids stay in order =="
@@ -187,6 +191,40 @@ echo "== 9. the deploy log =="
 grep -q " $APP deploy $id2 ok " "$LOGFILE" && ok "successful deploy is logged" || bad "no log line for deploy"
 grep -q " invalid-name deploy - fail " "$LOGFILE" && ok "failed deploy is logged (name shown as invalid-name)" || bad "no log line for failure"
 grep -q " $APP deploy - fail .*symlink" "$LOGFILE" && ok "failure reason is logged" || bad "no failure reason in log"
+[ "$(stat -c %a "$LOGFILE")" = 640 ] && ok "the deploy log is 640 (root only)" || bad "deploy log mode $(stat -c %a "$LOGFILE")"
+
+echo
+echo "== 10. private state files: created narrow, old wide ones narrowed, links refused =="
+python3 - "$SRC" <<PY || fail=1
+import os, sys, stat
+sys.path.insert(0, "$REPO/scripts")
+import deploy, webhook
+tmp = sys.argv[1]
+bad = 0
+def check(cond, msg):
+    global bad
+    print(("ok    " if cond else "FAIL  ") + msg); bad += not cond
+mode = lambda p: stat.S_IMODE(os.lstat(p).st_mode)
+deploy.LOG_FILE = __import__("pathlib").Path(tmp, "deploy.log")          # never the real log
+deploy.log_event("demo", "deploy", None, "ok", 0)
+check(mode(deploy.LOG_FILE) == 0o640, f"a new deploy log is 640 (got {mode(deploy.LOG_FILE):o})")
+os.chmod(deploy.LOG_FILE, 0o644)
+deploy.log_event("demo", "deploy", None, "ok", 0)
+check(mode(deploy.LOG_FILE) == 0o640, "an old 644 deploy log is narrowed to 640")
+target = os.path.join(tmp, "elsewhere.txt"); open(target, "w").close()
+link = os.path.join(tmp, "linked.log"); os.symlink(target, link)
+deploy.LOG_FILE = __import__("pathlib").Path(link)
+deploy.log_event("demo", "deploy", None, "ok", 0)       # warns, never follows the link
+check(os.path.getsize(target) == 0, "a link in place of the log is not followed")
+seen_path = os.path.join(tmp, "deliveries")
+open(seen_path, "w").close(); os.chmod(seen_path, 0o644)
+s = webhook.Seen(seen_path)
+check(mode(seen_path) == 0o600, f"an old 644 deliveries file is narrowed at start (got {mode(seen_path):o})")
+os.remove(seen_path)
+webhook.Seen(seen_path).add("12345678-1234-1234-1234-123456789abc")
+check(mode(seen_path) == 0o600, "a new deliveries file is 600")
+sys.exit(1 if bad else 0)
+PY
 
 echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi

@@ -206,8 +206,9 @@ def client_env(env):
     return {**base, **env}
 
 
-def _run_box(work, image, script, capture, tail, env, forms, deadline):
-    """One `docker run` of `script` in the locked-down box. Returns the exit code."""
+def _run_box(work, image, script, capture, tail, env, forms, deadline, offline=False):
+    """One `docker run` of `script` in the locked-down box. Returns the exit code.
+    offline=True: no network at all (the box that holds the app's values)."""
     name = f"mini-deploy-build-{uuid.uuid4().hex[:12]}"
     # `-e KEY` with no "=value": docker copies the value from its own environment. So the
     # value never sits in a command line, where `ps` and the journal could show it.
@@ -223,6 +224,9 @@ def _run_box(work, image, script, capture, tail, env, forms, deadline):
         *env_args,  # before our own -e flags, so HOME and the npm cache always win
         "-e", "HOME=/tmp", "-e", "npm_config_cache=/tmp/.npm",
         "--memory", "1g", "--cpus", "2", "--pids-limit", "512",
+        # Masking only covers what the build prints. Without a network, package code that
+        # runs during the build cannot send a value away, or reach the home network.
+        *(("--network", "none") if offline else ()),
         "-v", f"{work}:/app", "-w", "/app",
         image,
         "sh", "-c", script,
@@ -249,7 +253,9 @@ def _run_box(work, image, script, capture, tail, env, forms, deadline):
 def docker_build(work, image, install_scripts, capture=None, env=None, forms=()):
     """Two boxes, one after the other, sharing only /app:
       1. `npm ci`          with NO app values: package install steps cannot see a secret;
-      2. `npm run build`   with the app's values.
+                           it needs the network to download the packages;
+      2. `npm run build`   with the app's values and NO network (a build that downloads
+                           something at build time fails here, on purpose).
     Same limits for both; one TIMEOUT for the pair."""
     deadline = time.monotonic() + TIMEOUT
     tail = collections.deque(maxlen=40)
@@ -258,7 +264,7 @@ def docker_build(work, image, install_scripts, capture=None, env=None, forms=())
     if rc != 0:
         why = " | ".join(list(tail)[-4:])
         raise BuildError(f"build failed (npm ci, exit {rc}); nothing was deployed: {why}")
-    rc = _run_box(work, image, "npm run build", capture, tail, env or {}, forms, deadline)
+    rc = _run_box(work, image, "npm run build", capture, tail, env or {}, forms, deadline, offline=True)
     if rc != 0:
         why = " | ".join(list(tail)[-4:])
         raise BuildError(f"build failed (exit {rc}); nothing was deployed: {why}")

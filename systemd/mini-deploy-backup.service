@@ -1,0 +1,27 @@
+# One backup: /sites and admin.db WITHOUT secrets, into the OneDrive folder on Windows (so a
+# copy leaves this PC). Started weekly by the .timer; by hand: systemctl start mini-deploy-backup
+# Result: journalctl -u mini-deploy-backup. Restore: scripts/backup.py restore (see its help).
+[Unit]
+Description=mini-deploy: weekly secret-free backup of /sites and admin.db
+RequiresMountsFor=/mnt/c/Users/indra/Code/mini-deploy /mnt/c/Users/indra/OneDrive
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/backup.py make
+# Sandbox: it reads /sites, admin.db and the env NAMES; it writes only its temp folder, the
+# backup folder and its status file (/var/lib/mini-deploy/backup.json, shown on the admin page).
+# The secret files are hidden from it entirely (it never needs them). "-": if OneDrive moved the
+# backup folder, the run still starts, fails in Python, and the failure reaches the admin page.
+ProtectSystem=strict
+ReadWritePaths=/var/tmp /var/lib/mini-deploy -/mnt/c/Users/indra/OneDrive/mini-deploy-backups
+InaccessiblePaths=-/etc/mini-deploy/env -/etc/mini-deploy/github-token -/etc/mini-deploy/ci.json -/etc/mini-deploy/home-lan -/run/docker.sock -/var/run/docker.sock
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+NoNewPrivileges=yes
+Nice=10
+IOSchedulingClass=idle

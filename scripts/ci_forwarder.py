@@ -20,6 +20,7 @@ import os
 import re
 import stat
 import sys
+import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -41,6 +42,8 @@ DRAIN_LIMIT = 16 * 1024 * 1024   # a refused body is read and dropped up to this
 CONNECT_TIMEOUT = 5       # seconds to reach the service at all
 TIMEOUT = 300             # seconds; a long answer can take a while
 CHUNK = 64 * 1024
+READ_TIMEOUT = 30         # seconds per read or write on the phone's connection (a slow sender gives up)
+MAX_HANDLERS = 16         # connections handled at once; more get a 503 at once
 
 
 class ConfigError(Exception):
@@ -106,10 +109,18 @@ def save_upstream(url):
 class Handler(BaseHTTPRequestHandler):
     server_version = "mini-deploy-ci"
     sys_version = ""
+    # Without this a connection that sends nothing (or one byte a minute) holds its thread forever.
+    # Only the phone's side: the answer from the service has its own TIMEOUT.
+    timeout = READ_TIMEOUT
 
     def log_message(self, fmt, *args):
         # One line per request: method, path and status. Never headers or bodies (they hold the key).
-        print(f"{self.command} {urllib.parse.urlsplit(self.path).path} {args[1] if len(args) > 1 else ''}",
+        # A connection that timed out before sending a request line has no command or path yet.
+        command, path = getattr(self, "command", None), getattr(self, "path", None)
+        if not command or path is None:
+            print("connection closed before a request arrived", flush=True)
+            return
+        print(f"{command} {urllib.parse.urlsplit(path).path} {args[1] if len(args) > 1 else ''}",
               flush=True)
 
     def do_GET(self):
@@ -205,8 +216,43 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
 
 
+class Server(ThreadingHTTPServer):
+    """At most MAX_HANDLERS connections at once: a device on the Wi-Fi or the tailnet that
+    opens many connections gets 503s, and the threads it can hold stay bounded."""
+    daemon_threads = True
+    max_handlers = MAX_HANDLERS
+
+    def __init__(self, *args, **kwargs):
+        self.slots = threading.BoundedSemaphore(self.max_handlers)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\n"
+                                b"Connection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:   # no thread was started (so it never releases the slot): give it back
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+    def handle_error(self, request, client_address):  # one quiet line, not a traceback
+        print(f"connection error: {sys.exc_info()[0].__name__}", file=sys.stderr, flush=True)
+
+
 def serve(listen=LISTEN):
-    httpd = ThreadingHTTPServer(listen, Handler)
+    httpd = Server(listen, Handler)
     print(f"listening on {listen[0]}:{listen[1]}", flush=True)
     httpd.serve_forever()
 

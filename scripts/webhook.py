@@ -230,7 +230,13 @@ class Seen:
                         self.ids.pop(d, None)
                 while len(self.ids) > limit:
                     self.ids.popitem(last=False)
-                Path(path).write_text("".join(f"+ {d}\n" for d in self.ids), encoding="ascii")
+                # Rewritten through a 0600 temp file and a rename: never readable by others, even briefly.
+                tmp = Path(path).with_name(Path(path).name + ".tmp")
+                fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                with os.fdopen(fd, "w", encoding="ascii") as fh:
+                    fh.write("".join(f"+ {d}\n" for d in self.ids))
+                os.chmod(tmp, 0o600)   # an older temp file left behind keeps its old mode otherwise
+                os.replace(tmp, path)
             except OSError:
                 pass
 
@@ -238,8 +244,7 @@ class Seen:
         if not self.path:
             return
         try:
-            with open(self.path, "a", encoding="ascii") as fh:
-                fh.write(line + "\n")
+            deploy_mod.append_private(self.path, line, 0o600)   # root only, like the rest of the state
         except OSError:
             pass  # in-memory protection still works
 

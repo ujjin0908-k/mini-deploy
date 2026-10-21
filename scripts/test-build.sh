@@ -53,13 +53,22 @@ echo
 echo "== 3. the build box is locked down =="
 PROBE=probe-build
 make_repo "$SRC/probe" '
-const fs = require("fs");
+const fs = require("fs"), os = require("os"), net = require("net");
 let ro = "no"; try { fs.writeFileSync("/usr/probe", "x"); } catch (e) { ro = "yes"; }
-fs.mkdirSync("dist", { recursive: true });
-fs.writeFileSync("dist/index.html",
-  "uid:" + process.getuid() + " rootfs-readonly:" + ro +
-  " env-file:" + (fs.existsSync(".env") ? "yes" : "no") +
-  " postinstall:" + (fs.existsSync("postinstall-ran") ? "yes" : "no") + "\n");'
+// Network: which interfaces besides loopback, and can it open a connection out?
+const ifs = Object.keys(os.networkInterfaces()).filter(n => n !== "lo");
+const done = (out) => {
+  fs.mkdirSync("dist", { recursive: true });
+  fs.writeFileSync("dist/index.html",
+    "uid:" + process.getuid() + " rootfs-readonly:" + ro +
+    " env-file:" + (fs.existsSync(".env") ? "yes" : "no") +
+    " postinstall:" + (fs.existsSync("postinstall-ran") ? "yes" : "no") +
+    " interfaces:" + (ifs.length ? ifs.join(",") : "lo-only") + " connect-out:" + out + "\n");
+};
+const s = net.connect({ host: "1.1.1.1", port: 53, timeout: 4000 });
+s.on("connect", () => { s.destroy(); done("yes"); });
+s.on("timeout", () => { s.destroy(); done("timeout"); });
+s.on("error", () => done("no"));'
 echo "SECRET=do-not-leak" > "$SRC/probe/.env"
 # A lifecycle script that would run during npm ci if scripts were allowed.
 cat > "$SRC/probe/package.json" <<'JSON'
@@ -74,6 +83,8 @@ grep -q 'uid:1000 ' <<<"$facts"            && ok "build ran as uid 1000, not roo
 grep -q 'rootfs-readonly:yes' <<<"$facts"  && ok "container filesystem is read-only"    || bad "container filesystem writable"
 grep -q 'env-file:no' <<<"$facts"          && ok ".env was not copied into the box"     || bad ".env reached the container"
 grep -q 'postinstall:no' <<<"$facts"       && ok "npm lifecycle scripts did not run"    || echo "note  postinstall ran or unknown: $facts"
+grep -q 'interfaces:lo-only' <<<"$facts"   && ok "build box has no network interface"   || bad "build box has a network: $facts"
+grep -q 'connect-out:no' <<<"$facts"       && ok "build box cannot connect out"         || bad "build box reached the outside: $facts"
 [ -e "/sites/$PROBE/current/.env" ] && bad ".env was published" || ok ".env is not in the release"
 
 echo
@@ -445,6 +456,8 @@ build.docker_build(Path("/nonexistent"), "img", False, None, {"API_TOKEN": secre
 build.subprocess.Popen, build.subprocess.run = real_popen, real_run
 (ci_cmd, ci_env), (cmd, env) = calls
 check(len(calls) == 2 and ci_cmd[-1].startswith("npm ci") and cmd[-1] == "npm run build", "two boxes: npm ci, then npm run build")
+check(cmd[cmd.index("--network") + 1] == "none" if "--network" in cmd else False, "the build box (with values) has no network")
+check("--network" not in ci_cmd, "the npm ci box keeps the network (it downloads packages)")
 check("API_TOKEN" not in ci_cmd and "API_TOKEN" not in ci_env, "the npm ci box gets no app values")
 check(not any(secret in a for c, _ in calls for a in c), "the secret is not on any docker command line")
 check(cmd[cmd.index("API_TOKEN") - 1] == "-e" and "MODE" in cmd, "names are passed as -e KEY")
