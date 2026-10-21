@@ -18,8 +18,11 @@ tmp = Path(tempfile.mkdtemp(prefix="mini-deploy-bktest-"))
 os.environ["MINI_DEPLOY_TESTING"] = "1"
 os.environ["MINI_DEPLOY_ADMIN_DB"] = str(tmp / "state" / "admin.db")
 os.environ["MINI_DEPLOY_APP_ENV"] = str(tmp / "apps")
+os.environ["MINI_DEPLOY_CI_LIMITS"] = str(tmp / "ci-limits.json")
 sys.path.insert(0, "$REPO/scripts")
-import deploy, admindb, appenv, backup
+import deploy, admindb, appenv, backup, ci_forwarder
+TEST_LIMITS = {"bk-app": {"models": None, "max_tokens": 1000, "at_once": 2, "per_minute": 10, "per_day": 100}}
+ci_forwarder._write_private_json(ci_forwarder.LIMITS, TEST_LIMITS)
 deploy.SITES = tmp / "sites"; deploy.SITES.mkdir()
 deploy.LOG_FILE = tmp / "deploy.log"           # never the real deploy log
 dest = tmp / "backups"
@@ -86,6 +89,10 @@ check(f"sites/{app}/.hold" in names and "RESTORE.txt" in names and "admin.db" in
 check(manifest["env_names"].get(app) == [{"name": "API_TOKEN", "public": False}, {"name": "SITE_NAME", "public": True}],
       "the manifest lists env value NAMES only")
 check(manifest["admin_db"] == {"repos": 1, "audit": 1}, f"the manifest counts repos and audit rows ({manifest['admin_db']})")
+with tarfile.open(path, "r:gz") as tar:
+    archived_limits = json.load(tar.extractfile("ci-limits.json")) if "ci-limits.json" in tar.getnames() else None
+check(archived_limits == TEST_LIMITS and manifest["ci_limits"] is True,
+      "the AI limits are in the backup (not secret; a restore without them would refuse every AI call)")
 
 # --- restore: same releases, same live link, secrets gone, nothing live touched
 into = tmp / "restored"
@@ -276,16 +283,28 @@ check(backup.read_status(now=time.time() + 9 * 86400)["stale"] is True, "nine da
 # --- apply: places what is missing, never replaces
 sites2 = tmp / "sites2"; sites2.mkdir()
 db2 = tmp / "state2" / "admin.db"
-placed, kept = backup.apply(into, sites=sites2, db_path=db2)
-check(app in placed and str(db2) in placed and not kept, f"apply places the app and admin.db ({placed})")
+lim2 = tmp / "etc2" / "ci-limits.json"
+placed, kept = backup.apply(into, sites=sites2, db_path=db2, limits_path=lim2)
+check(app in placed and str(db2) in placed and str(lim2) in placed and not kept,
+      f"apply places the app, admin.db and the AI limits ({len(placed)} placed)")
+check(json.loads(lim2.read_text()) == TEST_LIMITS and oct(os.stat(lim2).st_mode & 0o777) == "0o600",
+      "the placed AI limits are the backed-up ones, 600")
 check(oct(os.stat(db2).st_mode & 0o777) == "0o600" and oct(os.stat(db2.parent).st_mode & 0o777) == "0o700",
       "the placed admin.db is 600 in a 700 folder")
 check(tree_hashes(sites2 / app / "releases") == tree_hashes(into / "sites" / app / "releases")
       and os.readlink(sites2 / app / "current") == os.readlink(src_root / "current"), "the placed app is the restored one")
 (sites2 / app / "marker").write_text("mine")
-placed, kept = backup.apply(into, sites=sites2, db_path=db2)
-check(not placed and app in kept and str(db2) in kept and (sites2 / app / "marker").exists(),
-      "a second apply replaces nothing (app and admin.db kept)")
+placed, kept = backup.apply(into, sites=sites2, db_path=db2, limits_path=lim2)
+check(not placed and app in kept and str(db2) in kept and str(lim2) in kept and (sites2 / app / "marker").exists(),
+      "a second apply replaces nothing (app, admin.db and AI limits kept)")
+# limits in an archive that would not work are refused before anything is copied
+bad_lim = hostile("mini-deploy-20990101-000021.tar.gz", [
+    file_info("manifest.json", json.dumps({"format": 1, "apps": {}}).encode()),
+    file_info("ci-limits.json", json.dumps({"x": {"models": None}}).encode())])
+try:
+    backup.restore(bad_lim, tmp / "into-badlim"); check(False, "unusable AI limits in an archive are refused")
+except backup.BackupError:
+    check(True, "unusable AI limits in an archive are refused")
 print("leftovers for the owner:", tmp)
 sys.exit(1 if bad_count else 0)
 PY

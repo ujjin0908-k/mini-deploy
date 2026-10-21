@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import deploy as deploy_mod   # noqa: E402  (APP_RE, ID_RE, check_tree, SITES)
 import admindb                # noqa: E402  (DB_PATH)
 import appenv                 # noqa: E402  (env value names: ENV_ROOT, load)
+import ci_forwarder as ci_mod # noqa: E402  (the AI limits: not secret, so they are backed up)
 
 DEST = Path("/mnt/c/Users/indra/OneDrive/mini-deploy-backups")
 KEEP = 8                                  # weekly: about two months of history
@@ -54,7 +55,7 @@ LOCK_WAIT = 120                           # seconds to wait for an app's running
 STALE_DAYS = 8                            # weekly + a day: older than this, the admin page warns
 SCAN_CHUNK = 1024 * 1024
 WORK_ROOT = Path("/var/tmp")
-TOP_ENTRIES = {"manifest.json", "RESTORE.txt", "admin.db", "sites"}
+TOP_ENTRIES = {"manifest.json", "RESTORE.txt", "admin.db", "sites", "ci-limits.json"}
 
 
 def status_path():
@@ -71,6 +72,8 @@ This archive holds no secrets. After `backup.py restore` and `backup.py apply`:
                         repo's webhook on GitHub (until then every push is refused: 401)
 4. Old shared secret:   python3 scripts/webhook.py --init-env   (only if config/webhook.json lists repos)
 5. Cheaper Inference:   echo 'https://...' | python3 scripts/ci_forwarder.py set-upstream
+   AI limits:           `backup.py apply` puts ci-limits.json back (if none exists); check it with
+                        `python3 scripts/ci_forwarder.py usage`. Without it every AI call is refused.
 6. Home network:        bash scripts/run-caddy.sh remember-home   (at home)
 7. Env values:          python3 scripts/appenv.py set <app> <KEY>   (names are in manifest.json)
 8. Services:            install the units from systemd/ and start them (see CLAUDE.md)
@@ -309,9 +312,14 @@ def make(dest=DEST, keep=KEEP, sites=None, db_path=None, apps_dir=None):
     part = dest / f".mini-deploy-{backup_id}.tar.gz.part"
     try:
         db_counts = scrubbed_db(db_path, work / "admin.db")
+        try:   # the AI limits (no secret inside): saved checked, so a restore gets usable ones
+            (work / "ci-limits.json").write_text(json.dumps(ci_mod.load_limits(), indent=1) + "\n", encoding="utf-8")
+            has_limits = True
+        except ci_mod.ConfigError:
+            has_limits = False
         manifest = {
             "format": FORMAT, "created": backup_id, "apps": {},   # apps: filled in under each lock
-            "admin_db": db_counts, "env_names": env_names(apps_dir),
+            "admin_db": db_counts, "env_names": env_names(apps_dir), "ci_limits": has_limits,
             "not_included": ["/etc/mini-deploy (secrets, token, CI address, home network)",
                              "env values", "build logs", "password hash and sessions"],
         }
@@ -325,6 +333,8 @@ def make(dest=DEST, keep=KEEP, sites=None, db_path=None, apps_dir=None):
                 tar.add(work / "RESTORE.txt", "RESTORE.txt", filter=_filter)
                 if db_counts is not None:
                     tar.add(work / "admin.db", "admin.db", filter=_filter)
+                if has_limits:
+                    tar.add(work / "ci-limits.json", "ci-limits.json", filter=_filter)
                 for app in apps:
                     root = sites / app
                     # The app's own deploy lock: a deploy or prune cannot flip `current` or remove
@@ -385,7 +395,7 @@ def restore(archive, into):
             if members > MAX_MEMBERS or total > MAX_RESTORE_BYTES:
                 raise BackupError("the archive is larger than any backup this PC makes; not used")
             parts = m.name.split("/")
-            ok = m.name in ("manifest.json", "RESTORE.txt", "admin.db") or \
+            ok = m.name in TOP_ENTRIES - {"sites"} or \
                 (len(parts) >= 3 and parts[0] == "sites" and deploy_mod.APP_RE.fullmatch(parts[1]))
             if not ok:
                 raise BackupError(f"unexpected entry in the archive: {m.name[:80]!r}")
@@ -452,6 +462,14 @@ def verify_tree(into, manifest):
         if not deploy_mod.APP_RE.fullmatch(app) or root.is_symlink() or not root.is_dir():
             raise BackupError(f"unexpected app folder {app[:60]!r}")
         _check_app(root, manifest["apps"][app], app)
+    lim = into / "ci-limits.json"
+    if lim.is_symlink() or (lim.exists() and not lim.is_file()):
+        raise BackupError("ci-limits.json must be a plain file")
+    if lim.exists():
+        try:
+            ci_mod.valid_limits(json.loads(lim.read_text(encoding="utf-8")))
+        except (ValueError, ci_mod.ConfigError) as e:
+            raise BackupError(f"ci-limits.json in the archive is not usable ({e})")
     db = into / "admin.db"
     if db.is_symlink() or (db.exists() and not db.is_file()):
         raise BackupError("admin.db must be a plain file")
@@ -468,12 +486,13 @@ def verify_tree(into, manifest):
             con.close()
 
 
-def apply(into, sites=None, db_path=None):
+def apply(into, sites=None, db_path=None, limits_path=None):
     """Put a restored copy in place. Never replaces anything: an app folder or an admin.db
     that already exists is kept and reported. Returns (placed, kept)."""
     into = Path(into)
     sites = Path(sites or deploy_mod.SITES)
     db_path = Path(db_path or admindb.DB_PATH)
+    limits_path = Path(limits_path or ci_mod.LIMITS)
     manifest = _manifest(into)
     verify_tree(into, manifest)
     placed, kept = [], []
@@ -501,6 +520,16 @@ def apply(into, sites=None, db_path=None):
             with os.fdopen(fd, "wb") as out, open(src_db, "rb") as src:
                 shutil.copyfileobj(src, out)
             placed.append(str(db_path))
+    src_lim = into / "ci-limits.json"
+    if src_lim.exists():
+        if limits_path.exists():
+            kept.append(str(limits_path))
+        else:
+            limits_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(limits_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as out, open(src_lim, "rb") as src:
+                shutil.copyfileobj(src, out)
+            placed.append(str(limits_path))
     return placed, kept
 
 

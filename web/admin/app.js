@@ -230,6 +230,24 @@
       note.className = "muted small";
       note.textContent = "Last backup " + when(backup.last_ok) + " (OneDrive, no secrets inside).";
     }
+    // AI use today per app, against its daily limit (counts only). Red once an app hit its limit.
+    var ai = data.ai || {};
+    var parts = [], full = false;
+    Object.keys(ai).sort().forEach(function (name) {
+      var u = ai[name];
+      if (typeof u.per_day === "number") {
+        parts.push(name + " " + u.requests + "/" + u.per_day);
+        if (u.requests >= u.per_day) { full = true; }
+      } else {
+        parts.push(name + " " + u.requests + " (no limits: refused)");
+      }
+    });
+    var aiWarn = typeof data.ai_warning === "string" ? data.ai_warning : "";
+    $("ai-note").className = full || aiWarn ? "small result-bad" : "muted small";
+    $("ai-note").textContent = (parts.length
+      ? "AI use today (resets 00:00 JST): " + parts.join(" · ") + (full ? ". A daily limit was reached." : "")
+      : "AI use today: no limits set yet, so every AI request is refused.")
+      + (aiWarn ? " Warning: " + aiWarn + "." : "");
 
     knownApps = data.apps.map(function (a) { return a.name; });
     var apps = $("apps");

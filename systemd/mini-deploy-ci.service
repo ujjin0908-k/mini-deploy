@@ -7,9 +7,12 @@
 # Set the upstream address once (kept in /etc/mini-deploy/ci.json, never in git). Typed hidden,
 # so it does not stay in the shell history:
 #   read -rs ADDR; echo "$ADDR" | python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/ci_forwarder.py set-upstream; unset ADDR
+# Per-app limits (no entry = that app is refused): a JSON file on stdin, checked before saving:
+#   python3 /mnt/c/Users/indra/Code/mini-deploy/scripts/ci_forwarder.py set-limits < limits.json
 # Use:
 #   systemctl status mini-deploy-ci        is it running?
 #   journalctl -u mini-deploy-ci -n 50     one line per request (method, path, status; never keys)
+#   python3 .../ci_forwarder.py usage      requests per app today, against each daily limit
 
 [Unit]
 Description=mini-deploy Cheaper Inference forwarder (127.0.0.1:9200, behind Caddy /api/ci)
@@ -26,8 +29,11 @@ Restart=on-failure
 RestartSec=5
 RestartPreventExitStatus=1
 
-# Sandbox: read-only system, no writes at all (it stores nothing).
+# Sandbox: read-only system. Its one writable place is its own state folder, made by systemd
+# (/var/lib/mini-deploy-ci, 0700): today's request counters. Never the key, a prompt or an answer.
 ProtectSystem=strict
+StateDirectory=mini-deploy-ci
+StateDirectoryMode=0700
 ProtectHome=read-only
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

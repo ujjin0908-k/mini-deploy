@@ -31,9 +31,13 @@
         get_certificate tailscale
     }
     handle {
-        # Cheaper Inference, exactly as on :8080 (the app calls /api/ci/... on its own origin)
+        # Cheaper Inference, exactly as on :8080 (the app calls /api/ci/... on its own origin).
+        # X-MD-App names the app for the forwarder's per-app limits; header_up overwrites anything
+        # the phone sent, so an app can never spend another app's allowance.
         handle /api/ci/* {
-            reverse_proxy 127.0.0.1:9200
+            reverse_proxy 127.0.0.1:9200 {
+                header_up X-MD-App {args[0]}
+            }
         }
         @dotfile path_regexp (^|/)\.
         respond @dotfile 404
@@ -142,8 +146,12 @@ https://mini-deploy.tail206989.ts.net:8444 {
         # in-Caddy reverse proxy to a loopback service, for this one path only. It is NOT a
         # Funnel or tailscale serve in front of :8080 (that rule still holds). The forwarder
         # allowlists the paths and adds nothing: the phone's own key travels in the request.
+        # X-MD-App: the app name from the Host (already checked against the app-name rule above);
+        # it overwrites anything the client sent. Apps without limits are refused by the forwarder.
         handle /api/ci/* {
-            reverse_proxy 127.0.0.1:9200
+            reverse_proxy 127.0.0.1:9200 {
+                header_up X-MD-App {re.app.1}
+            }
         }
 
         # Never serve dotfiles or dot-folders (.env, .git/, .npmrc), at any depth.
