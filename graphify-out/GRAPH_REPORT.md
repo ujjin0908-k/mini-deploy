@@ -1,29 +1,29 @@
 # Graph Report - mini-deploy  (2026-10-23)
 
 ## Corpus Check
-- 42 files · ~87,224 words
+- 42 files · ~90,253 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 22 file(s) not represented in the graph (top: .css 11, .service 6, (none) 3)
 
 ## Summary
-- 779 nodes · 1794 edges · 49 communities (35 shown, 14 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 63 edges (avg confidence: 0.92)
+- 792 nodes · 1845 edges · 48 communities (34 shown, 14 thin omitted)
+- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 72 edges (avg confidence: 0.92)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `95086003`
+- Built from commit: `d6afa972`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
 ## Community Hubs (Navigation)
 - deploy.py
-- admin.py
+- Handler
 - build.py
-- buildlog.py
+- time
 - test-webhook.sh
-- appenv.py
+- os
 - re
-- ci_forwarder.py
+- sys
 - repos.py
 - backup.py
 - Jobs
@@ -36,10 +36,11 @@
 - package.json
 - test-deploy.sh
 - build.js
+- admin.py
 - run-caddy.sh
-- os
+- find_secret
 - mini-deploy: notes for agents
-- main
+- db
 - test-admin.sh
 - The demo site, explained
 - logs/app.js
@@ -49,31 +50,29 @@
 - sync-theme.sh
 - The landing page, explained
 - Running commands in WSL
-- _read_private_json
+- Server
 - README.md
 - test-all.sh
 - webhook.py
 - Usage
-- write_pending
-- process
-- Handler
+- _build_locked
+- state
+- Capture
+- secret_forms
 - test-upload.sh
-- Seen
-- json
-- Server
-- main
+- _clean
 
 ## God Nodes (most connected - your core abstractions)
 1. `test-webhook.sh script` - 31 edges
-2. `Handler` - 23 edges
-3. `run_job()` - 23 edges
-4. `Security rules (the reviewers check these)` - 22 edges
-5. `make()` - 20 edges
-6. `mini-deploy status log` - 20 edges
-7. `db()` - 19 edges
+2. `Security rules (the reviewers check these)` - 29 edges
+3. `Handler` - 24 edges
+4. `run_job()` - 24 edges
+5. `db()` - 21 edges
+6. `make()` - 20 edges
+7. `mini-deploy status log` - 20 edges
 8. `DeployError` - 17 edges
 9. `remove_preview()` - 16 edges
-10. `load()` - 15 edges
+10. `take_redeploy_requests()` - 16 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `Security rules (the reviewers check these)` --references--> `fail()`  [INFERRED]
@@ -90,47 +89,47 @@
 ## Import Cycles
 - None detected.
 
-## Communities (49 total, 14 thin omitted)
+## Communities (48 total, 14 thin omitted)
 
 ### Community 0 - "deploy.py"
-Cohesion: 0.05
-Nodes (50): Security rules (the reviewers check these), Stages, mini-deploy status log, main(), collect(), collect_apps(), parse_log(), public_detail() (+42 more)
-
-### Community 1 - "admin.py"
-Cohesion: 0.05
-Nodes (27): check_password(), _clean(), find_session(), Handler, hash_password(), log_login(), login_wait(), main() (+19 more)
+Cohesion: 0.06
+Nodes (45): Stages, mini-deploy status log, collect_apps(), app_paths(), append_private(), _check_expected(), check_preview(), check_tree() (+37 more)
 
 ### Community 2 - "build.py"
-Cohesion: 0.09
-Nodes (16): all_forms(), build_and_deploy(), _build_locked(), BuildError, chown_tree(), client_env(), docker_build(), EnvBuildError (+8 more)
+Cohesion: 0.18
+Nodes (6): client_env(), docker_build(), mask(), pump_output(), _run_box(), sweep_stale()
 
-### Community 3 - "buildlog.py"
-Cohesion: 0.10
-Nodes (14): Capture, clean(), _key(), _locked(), logs_of(), _new_id(), prune(), read_header() (+6 more)
+### Community 3 - "time"
+Cohesion: 0.14
+Nodes (12): _key(), _locked(), logs_of(), _new_id(), prune(), read_header(), remove_app(), _replace_atomically() (+4 more)
 
 ### Community 4 - "test-webhook.sh"
 Cohesion: 0.11
 Nodes (36): bad(), body(), bpush(), break_build(), check_code(), code_of(), commit_page(), expect() (+28 more)
 
-### Community 5 - "appenv.py"
-Cohesion: 0.17
-Nodes (15): check_key(), _check_private(), check_root(), check_value(), env_file(), EnvError, file_for_build(), for_build() (+7 more)
+### Community 5 - "os"
+Cohesion: 0.05
+Nodes (39): check_key(), _check_private(), check_root(), check_value(), env_file(), EnvError, file_for_build(), for_build() (+31 more)
 
 ### Community 6 - "re"
-Cohesion: 0.14
-Nodes (11): connected_apps(), is_test_name(), main(), plan(), css_variables(), export(), main(), resolve() (+3 more)
+Cohesion: 0.09
+Nodes (15): connected_apps(), is_test_name(), main(), plan(), collect(), parse_log(), public_detail(), read_log_tail() (+7 more)
 
-### Community 7 - "ci_forwarder.py"
-Cohesion: 0.15
-Nodes (4): BodyError, check_body(), _count(), _no_duplicates()
+### Community 7 - "sys"
+Cohesion: 0.22
+Nodes (5): build_and_deploy(), BuildError, image_ref(), main(), node_major()
 
 ### Community 8 - "repos.py"
-Cohesion: 0.14
-Nodes (11): _config(), _full_row(), hook_base(), list_repos(), read_token(), repo_by_hook(), repo_by_name(), repo_for_app() (+3 more)
+Cohesion: 0.13
+Nodes (13): _check(), _config(), connect(), _full_row(), hook_base(), list_repos(), repo_by_hook(), repo_by_name() (+5 more)
 
 ### Community 9 - "backup.py"
 Cohesion: 0.09
 Nodes (20): app_lock(), apply(), _apps(), BackupError, _check_app(), check_archive(), env_names(), _filter() (+12 more)
+
+### Community 10 - "Jobs"
+Cohesion: 0.10
+Nodes (3): Jobs, Seen, State
 
 ### Community 12 - "test-build.sh"
 Cohesion: 0.35
@@ -164,21 +163,25 @@ Nodes (7): bad(), expect_error(), host_get(), link_of(), live_id(), ok(), test-d
 Cohesion: 0.25
 Nodes (5): fs, outDir, path, srcDir, WEB_FILES
 
+### Community 20 - "admin.py"
+Cohesion: 0.16
+Nodes (11): check_password(), hash_password(), log_login(), login_wait(), main(), new_session(), _now_iso(), serve() (+3 more)
+
 ### Community 21 - "run-caddy.sh"
 Cohesion: 0.20
 Nodes (18): busy_phone_ports(), current(), do_reload(), fallback_config(), gateway_ip(), gateway_mac(), lan_bind(), listening_lan() (+10 more)
 
-### Community 22 - "os"
-Cohesion: 0.17
-Nodes (8): _private(), find_secret(), _walk_strict(), fail(), _check_private(), strip_special_modes(), _private_file(), set_token()
+### Community 22 - "find_secret"
+Cohesion: 0.40
+Nodes (3): find_secret(), _walk_strict(), fail()
 
 ### Community 23 - "mini-deploy: notes for agents"
 Cohesion: 0.20
 Nodes (9): Code map (graphify), Commands, Environment, Git, Handoff (start of the next session, updated 2026-10-15, end of session), mini-deploy: notes for agents, Owner's decisions (from the Obsidian note), Owner's working style (+1 more)
 
-### Community 24 - "main"
-Cohesion: 0.18
-Nodes (6): ConfigError, init_env(), main(), QueueFull, read_secret(), read_secret_from_file()
+### Community 24 - "db"
+Cohesion: 0.24
+Nodes (5): audit(), db(), _now_iso(), _private(), disconnect()
 
 ### Community 25 - "test-admin.sh"
 Cohesion: 0.60
@@ -204,53 +207,45 @@ Nodes (7): Files, How the look is made, One theme, many copies, The landing page
 Cohesion: 0.29
 Nodes (6): 1. Simple command: pass arguments directly, 2. Anything with pipes, variables, loops or quotes: use a script file, 3. Long-running servers: systemd services (Caddy, the webhook), 4. Installs and destructive commands: run them directly, never inside a script, 5. Paths, Running commands in WSL
 
-### Community 34 - "_read_private_json"
-Cohesion: 0.22
-Nodes (5): clean_days(), load_limits(), _read_private_json(), usage_today(), usage_warning()
+### Community 34 - "Server"
+Cohesion: 0.25
+Nodes (3): Server, cut(), extend()
 
 ### Community 40 - "webhook.py"
-Cohesion: 0.18
-Nodes (12): sweep_stale(), check_checkout_size(), check_disk(), git(), GitError, job_token(), read_deployed(), remote_tip() (+4 more)
+Cohesion: 0.05
+Nodes (37): Security rules (the reviewers check these), safe_branch(), check_checkout_size(), check_disk(), ConfigError, db_lookup(), find_repo(), find_repo_for_app() (+29 more)
 
 ### Community 41 - "Usage"
 Cohesion: 0.12
 Nodes (3): seconds_to_midnight(), Server, Usage
 
-### Community 42 - "write_pending"
-Cohesion: 0.20
-Nodes (3): save_pending(), State, write_pending()
+### Community 42 - "_build_locked"
+Cohesion: 0.22
+Nodes (5): all_forms(), _build_locked(), chown_tree(), EnvBuildError, load_env()
 
-### Community 44 - "process"
-Cohesion: 0.20
-Nodes (6): db_lookup(), find_repo(), process(), RepoDBError, sweep_hook_dirs(), worker()
-
-### Community 48 - "json"
-Cohesion: 0.24
-Nodes (5): safe_branch(), load_config(), load_pending(), revive(), make_job()
-
-### Community 50 - "main"
-Cohesion: 0.15
-Nodes (9): ConfigError, day_key(), load_upstream(), main(), save_upstream(), serve(), valid_limits(), valid_upstream() (+1 more)
+### Community 43 - "state"
+Cohesion: 0.25
+Nodes (4): phone_base(), state(), tailnet_urls(), token_status()
 
 ## Knowledge Gaps
 - **47 isolated node(s):** `probe.sh script`, `fs`, `path`, `srcDir`, `outDir` (+42 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 295 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 301 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **14 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `Security rules (the reviewers check these)` connect `deploy.py` to `admin.py`, `build.py`, `repos.py`, `backup.py`, `webhook.py`, `admin/app.js`, `upload.py`, `json`, `os`, `mini-deploy: notes for agents`?**
-  _High betweenness centrality (0.085) - this node is a cross-community bridge._
+- **Why does `Security rules (the reviewers check these)` connect `webhook.py` to `deploy.py`, `os`, `re`, `repos.py`, `backup.py`, `_build_locked`, `state`, `admin/app.js`, `upload.py`, `find_secret`, `mini-deploy: notes for agents`, `db`?**
+  _High betweenness centrality (0.093) - this node is a cross-community bridge._
 - **What connects `probe.sh script`, `fs`, `path` to the rest of the system?**
   _47 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `deploy.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.05343320848938826 - nodes in this community are weakly interconnected._
-- **Why does `renderTrack()` connect `admin/app.js` to `deploy.py`?**
+  _Cohesion score 0.056790123456790124 - nodes in this community are weakly interconnected._
+- **Why does `renderTrack()` connect `admin/app.js` to `webhook.py`?**
   _High betweenness centrality (0.034) - this node is a cross-community bridge._
-- **Should `admin.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.053998632946001365 - nodes in this community are weakly interconnected._
-- **Should `build.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.09411764705882353 - nodes in this community are weakly interconnected._
-- **Should `buildlog.py` be split into smaller, more focused modules?**
-  _Cohesion score 0.10037878787878787 - nodes in this community are weakly interconnected._
+- **Should `time` be split into smaller, more focused modules?**
+  _Cohesion score 0.14153846153846153 - nodes in this community are weakly interconnected._
+- **Why does `Handler` connect `Handler` to `db`, `admin.py`, `_clean`?**
+  _High betweenness centrality (0.031) - this node is a cross-community bridge._
+- **Should `test-webhook.sh` be split into smaller, more focused modules?**
+  _Cohesion score 0.1073170731707317 - nodes in this community are weakly interconnected._

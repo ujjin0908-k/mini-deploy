@@ -138,7 +138,8 @@
   var CONFIRM = {
     rollback: "Roll back {app} to its previous release? Pushes from GitHub are then held until you press Unhold.",
     rollforward: "Move {app} forward to its next newer release? Pushes are held until you press Unhold.",
-    unhold: "Let pushes from GitHub deploy {app} again?"
+    unhold: "Let pushes from GitHub deploy {app} again?",
+    redeploy: "Build the newest commit of {app} from GitHub again and put it live? This also lifts a hold, like any deploy you start yourself."
   };
   // `live` is the release this page showed: the server refuses a rollback if live has
   // changed since (a double click or a retry must never go back two steps).
@@ -146,15 +147,22 @@
     if (!NAME_RE.test(app)) { return; }
     if (!window.confirm(CONFIRM[action].replace("{app}", app))) { return; }
     button.disabled = true;
-    var DONE = { rollback: "rolled back", rollforward: "rolled forward", unhold: "taking pushes again" };
+    var DONE = { rollback: "rolled back", rollforward: "rolled forward", unhold: "taking pushes again",
+      redeploy: "redeploy asked for" };
     api("POST", "/api/action", { action: action, app: app, expect: live }).then(function (res) {
       button.disabled = false;
       if (res.status === 200) {
         say("");
-        toast(app + ": " + DONE[action] + (action === "unhold" ? "" : ". Pushes wait until you press Unhold."));
-        holdMood("happy", action === "unhold"
-          ? app + " takes pushes from GitHub again."
-          : app + " is on another release now. I'm holding it, so a push can't undo that.", 8000);
+        if (action === "redeploy") {
+          toast(app + ": redeploy asked for. It shows up under Latest push in a few seconds.");
+          holdMood("brewing", "Fetching the newest " + app + " from GitHub to brew it again...", 6000);
+          setTimeout(load, 2500);   // the webhook looks for requests every 2 s
+        } else {
+          toast(app + ": " + DONE[action] + (action === "unhold" ? "" : ". Pushes wait until you press Unhold."));
+          holdMood("happy", action === "unhold"
+            ? app + " takes pushes from GitHub again."
+            : app + " is on another release now. I'm holding it, so a push can't undo that.", 8000);
+        }
       }
       else if (res.status === 401) { showLogin(true); say("please sign in again", true); return; }
       else {
@@ -227,7 +235,7 @@
     return box;
   }
 
-  function appCard(app, needsLook, atHome, usage) {
+  function appCard(app, needsLook, atHome, usage, fromGit) {
     var card = el("article", "glass app-card");
     var head = el("div", "app-head");
     var title = el("div", "app-title");
@@ -292,12 +300,20 @@
 
     if (NAME_RE.test(app.name)) {
       var actions = el("div", "actions");
-      [["rollback", "Roll back"], ["rollforward", "Roll forward"]].forEach(function (pair) {
-        var b = el("button", "pill", pair[1]);
-        b.type = "button";
-        b.addEventListener("click", function () { act(pair[0], app.name, app.live, b); });
-        actions.appendChild(b);
-      });
+      if (fromGit) {   // only an app a connected repo deploys: build its newest commit again
+        var r = el("button", "pill pill-dark", app.live ? "Redeploy" : "Deploy now");
+        r.type = "button";
+        r.addEventListener("click", function () { act("redeploy", app.name, app.live, r); });
+        actions.appendChild(r);
+      }
+      if (app.live) {
+        [["rollback", "Roll back"], ["rollforward", "Roll forward"]].forEach(function (pair) {
+          var b = el("button", "pill", pair[1]);
+          b.type = "button";
+          b.addEventListener("click", function () { act(pair[0], app.name, app.live, b); });
+          actions.appendChild(b);
+        });
+      }
       if (app.held) {
         var u = el("button", "pill pill-dark", "Unhold");
         u.type = "button";
@@ -460,8 +476,17 @@
     var apps = $("apps");
     apps.textContent = "";
     if (!data.apps.length) { apps.appendChild(el("p", "muted empty", "No apps yet.")); }
+    // Apps a connected repo deploys get Redeploy; one that never went live still gets a card.
+    var gitApps = {};
+    (data.repos || []).forEach(function (r) { if (r && NAME_RE.test(String(r.app))) { gitApps[r.app] = true; } });
+    var shown = {};
     data.apps.forEach(function (app) {
-      apps.appendChild(appCard(app, attention.indexOf(app.name) >= 0, data.at_home, ai[app.name]));
+      shown[app.name] = true;
+      apps.appendChild(appCard(app, attention.indexOf(app.name) >= 0, data.at_home, ai[app.name], gitApps[app.name] === true));
+    });
+    Object.keys(gitApps).sort().forEach(function (name) {
+      if (shown[name]) { return; }
+      apps.appendChild(appCard({ name: name, live: null, held: false, releases: [] }, false, data.at_home, ai[name], true));
     });
 
     var push = renderTrack(data);

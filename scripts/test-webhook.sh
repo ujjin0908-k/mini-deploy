@@ -864,5 +864,123 @@ grep -q '^FAIL' <<<"$units" && fail=1
 stop_server
 unset MINI_DEPLOY_TEST_REPO_URL MINI_DEPLOY_TOKEN_FILE MINI_DEPLOY_ADMIN_DB MINI_DEPLOY_TESTING
 
+echo
+echo "== 17. Redeploy from the admin page: a request file becomes a build of the branch tip =="
+python3 - <<'PY' || fail=1
+import json, os, subprocess, sys, tempfile, time
+from pathlib import Path
+tmp = Path(tempfile.mkdtemp(prefix="mini-deploy-hookredo-"))   # left for the owner, like the others
+os.environ["MINI_DEPLOY_TESTING"] = "1"
+os.environ["MINI_DEPLOY_ADMIN_DB"] = str(tmp / "state" / "admin.db")
+sys.path.insert(0, "/mnt/c/Users/indra/Code/mini-deploy/scripts")
+import deploy, repos, webhook
+deploy.SITES = tmp / "sites"; deploy.SITES.mkdir()
+deploy.LOG_FILE = tmp / "deploy.log"
+deploy.print = lambda *a, **k: None
+bad = 0
+def check(cond, msg):
+    global bad
+    print(("ok    " if cond else "FAIL  ") + msg); bad += not cond
+
+origin = tmp / "origin"; (origin / "site").mkdir(parents=True)
+g = lambda *a: subprocess.run(["git", "-C", str(origin), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                              check=True, capture_output=True, text=True).stdout.strip()
+subprocess.run(["git", "init", "-q", "-b", "main", str(origin)], check=True)
+(origin / "site" / "index.html").write_text("<h1>v1</h1>")
+g("add", "-A"); g("commit", "-qm", "v1")
+tip = g("rev-parse", "HEAD")
+
+app = f"redo-{os.getpid()}"
+(tmp / "state").mkdir(mode=0o700)
+cfg = {"app": app, "branch": "main", "subdir": "site", "url": f"file://{origin}", "previews": False, "kind": "static"}
+state = webhook.State(b"s" * 32, {"repos": {"test/redo": cfg}}, tmp / "state")
+take = lambda: webhook.take_redeploy_requests(state, True)
+
+check(repos.request_redeploy(tmp / "state", app) is True, "the admin side writes a request")
+check(repos.request_redeploy(tmp / "state", app) is False, "a second request for the same app waits behind the first")
+check(take() == 1, "the webhook takes the request")
+jobs = state.jobs.drain()
+check(len(jobs) == 1 and jobs[0]["redeploy"] is True and jobs[0]["sha"] == tip and jobs[0]["app"] == app,
+      "it becomes one build of the branch tip, marked as a redeploy")
+check(not (tmp / "state" / "redeploy" / f"{app}.json").exists(), "the request file is gone once taken")
+log = deploy.LOG_FILE.read_text()
+check(f" {app} webhook - queued " in log and "(redeploy)" in log, "the deploy log says queued (redeploy), so the page's track shows it")
+
+st, rel1 = webhook.run_job(jobs[0], True)
+check(st == "ok" and (deploy.SITES / app / "current" / "index.html").read_text() == "<h1>v1</h1>", "the redeploy built and went live")
+normal = dict(jobs[0]); normal.pop("redeploy")
+check(webhook.run_job(normal, True)[0] == "same", "a push of the same commit is still skipped as already live")
+st, rel2 = webhook.run_job(jobs[0], True)
+check(st == "ok" and rel2 != rel1, "a redeploy of the same commit builds it again (a new release)")
+deploy.rollback(app)
+check(deploy.is_held(deploy.SITES / app), "after a rollback the app is on hold")
+check(webhook.run_job(normal, True)[0] == "held", "a push is still stopped by the hold")
+st, rel3 = webhook.run_job(jobs[0], True)
+check(st == "ok" and not deploy.is_held(deploy.SITES / app), "a redeploy goes live and lifts the hold, like any manual deploy")
+
+# requests that are not what they claim: removed, never acted on, links never followed
+spool = tmp / "state" / "redeploy"
+victim = tmp / "victim.txt"; victim.write_text("keep")
+(spool / "Bad_Name.json").write_text(json.dumps({"app": "Bad_Name"}))
+(spool / "other.json").write_text(json.dumps({"app": app}))            # content names another app
+(spool / "big.json").write_text(json.dumps({"app": "big", "pad": "x" * 2000}))
+(spool / "feature--x.json").write_text(json.dumps({"app": "feature--x"}))
+(spool / "nobody.json").write_text(json.dumps({"app": "nobody"}))      # no repo deploys it
+os.symlink(victim, spool / "linky.json")
+check(take() == 0 and not state.jobs.drain(), "bad name, wrong content, too big, preview, unknown app, link: nothing queued")
+check(not any(spool.iterdir()) and victim.read_text() == "keep", "all of them removed; the link's target untouched")
+check("redeploy: no connected repo deploys this app" in deploy.LOG_FILE.read_text(), "an app no repo deploys is logged as a failed redeploy")
+
+# a rollback made WHILE a redeploy builds stops it (only a hold there at the start is lifted)
+real_deploy = deploy.deploy
+def rollback_midway(app_name, src, **kw):
+    (deploy.SITES / app_name / ".hold").write_text("rollback\n")   # the owner rolls back meanwhile
+    return real_deploy(app_name, src, **kw)
+deploy.deploy = rollback_midway
+st, _ = webhook.run_job(jobs[0], True)
+deploy.deploy = real_deploy
+check(st == "held" and deploy.is_held(deploy.SITES / app), "a rollback during a redeploy's build is kept (the redeploy stops as held)")
+check(webhook.run_job(dict(jobs[0]), True, check_tip=False)[0] == "held", "as a fallback (not the head of a chain) a redeploy never lifts a hold")
+deploy.unhold(app)
+
+# old requests (the webhook was down) are dropped; the admin side may replace a stale one
+spool = tmp / "state" / "redeploy"
+repos.request_redeploy(tmp / "state", app)
+old = time.time() - 3600
+os.utime(spool / f"{app}.json", (old, old))
+check(take() == 0 and not state.jobs.drain() and not (spool / f"{app}.json").exists(), "a request an hour old is dropped, not acted on")
+check("min old; not acted on" in deploy.LOG_FILE.read_text(), "and the log says why")
+repos.request_redeploy(tmp / "state", app); os.utime(spool / f"{app}.json", (old, old))
+check(repos.request_redeploy(tmp / "state", app) is True, "the admin side replaces a stale request instead of saying 'already waiting'")
+# while the server stops, requests stay for the next start
+state.stop.set()
+check(take() == 0 and (spool / f"{app}.json").exists(), "while stopping, a request is left in place")
+state.stop.clear()
+check(take() == 1 and len(state.jobs.drain()) == 1, "and taken on the next look")
+# a FIFO cannot hang the watcher; a folder others can write is not trusted
+os.mkfifo(spool / "fifo.json")
+check(take() == 0 and not (spool / "fifo.json").exists(), "a FIFO request is removed at once (no hang)")
+repos.request_redeploy(tmp / "state", app); os.chmod(spool, 0o777)
+check(take() == 0 and (spool / f"{app}.json").exists(), "a request folder others can write: nothing taken")
+os.chmod(spool, 0o700); (spool / f"{app}.json").unlink()
+
+# a redeploy and a push for the same app never chain as fallbacks (a fallback redeploy would lift a hold)
+q = webhook.Jobs()
+push_job = dict(normal); redo_job = dict(jobs[0])
+q.submit(redo_job); q.submit(push_job)
+check(q.pending[app] is push_job and push_job.get("fallback") is None, "a push that replaces a waiting redeploy does not keep it as a fallback")
+q2 = webhook.Jobs(); p2 = dict(normal); r2 = dict(jobs[0])
+q2.submit(p2); q2.submit(r2)
+check(q2.pending[app] is r2 and r2.get("fallback") is None, "a redeploy that replaces a waiting push does not keep it either")
+
+# a restart keeps it a redeploy
+webhook.write_pending(tmp / "state", [jobs[0]])
+state2 = webhook.State(b"s" * 32, {"repos": {"test/redo": cfg}}, tmp / "state")
+webhook.load_pending(state2)
+again = state2.jobs.drain()
+check(len(again) == 1 and again[0].get("redeploy") is True, "a queued redeploy is still a redeploy after a restart")
+sys.exit(1 if bad else 0)
+PY
+
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi
 exit $fail

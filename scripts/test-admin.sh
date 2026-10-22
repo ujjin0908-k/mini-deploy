@@ -524,9 +524,32 @@ check((tmp / "github-token").read_text().strip() == TOKEN, "the token is in its 
 st, b, _ = req("GET", "/api/state", cookie=cookie)
 check(jbody(b).get("token") == "set" and TOKEN.encode() not in b, "state says the token is set, without the value")
 
+# Redeploy: the page only asks (a request file); the webhook does the work
+ACTION = "/api/action"
+req("POST", CONNECT, {"repo": "owner/redo", "app": "adm-redo", "kind": "static", "subdir": "site"}, cookie=cookie, csrf=csrf)
+st, b, _ = req("POST", ACTION, {"action": "redeploy", "app": "adm-redo"}, cookie=cookie)
+check(st == 403, "redeploy without the CSRF token: 403")
+spool = tmp / "redeploy" / "adm-redo.json"
+st, b, _ = req("POST", ACTION, {"action": "redeploy", "app": "adm-redo"}, cookie=cookie, csrf=csrf)
+check(st == 200 and jbody(b).get("repo") == "owner/redo", f"redeploy of a connected app that never went live: asked for ({st})")
+check(spool.is_file() and json.loads(spool.read_text()) == {"app": "adm-redo"}
+      and oct(spool.stat().st_mode & 0o777) == "0o600" and oct((tmp / "redeploy").stat().st_mode & 0o777) == "0o700",
+      "the request is a 600 file holding only the app name, in a 700 folder")
+st, b, _ = req("POST", ACTION, {"action": "redeploy", "app": "adm-redo"}, cookie=cookie, csrf=csrf)
+check(st == 409 and "already waiting" in jbody(b).get("error", ""), "a second redeploy while one waits: 409")
+(deploy.SITES / "adm-zip" / "releases").mkdir(parents=True)
+for label, app, want in (("an app not deployed from GitHub (an upload)", "adm-zip", 409),
+                         ("a preview name", "feature--adm-redo", 409), ("a reserved name", "admin", 400),
+                         ("a bad name", "../x", 400)):
+    st, b, _ = req("POST", ACTION, {"action": "redeploy", "app": app}, cookie=cookie, csrf=csrf)
+    check(st == want and not (tmp / "redeploy" / f"{app}.json").exists(), f"redeploy refused: {label} ({st})")
+st, b, _ = req("GET", "/api/state", cookie=cookie)
+check(any(r.get("app") == "adm-redo" for r in jbody(b).get("repos", [])), "the page sees which apps a repo deploys (for the button)")
+
 con = sqlite3.connect(admin.DB_PATH)
 audit_text = " ".join(str(x) for row in con.execute("SELECT action, app, result FROM audit") for x in row)
 con.close()
+check("redeploy adm-redo ok" in audit_text and "redeploy adm-zip refused" in audit_text, "redeploys are audited, refusals too")
 check(all(a in audit_text for a in ("connect", "rotate-secret", "disconnect", "set-token")),
       "every change is in the audit log")
 seen = audit_text + journal.getvalue()

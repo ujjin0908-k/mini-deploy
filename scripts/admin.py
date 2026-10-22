@@ -95,7 +95,7 @@ STATIC = {
     "/style.css": ("style.css", "text/css; charset=utf-8"),
     "/admin.css": ("admin.css", "text/css; charset=utf-8"),
 }
-ACTIONS = ("rollback", "rollforward", "unhold")
+ACTIONS = ("rollback", "rollforward", "unhold", "redeploy")
 REPO_ROUTES = ("/api/repos/connect", "/api/repos/rotate", "/api/repos/disconnect", "/api/token")
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
        "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -600,6 +600,32 @@ class Handler(BaseHTTPRequestHandler):
             log_login(conn, "ok")
         return self._json(200, {"ok": True, "csrf": csrf}, [("Set-Cookie", self._cookie(token, MAX_AGE))])
 
+    def _redeploy(self, app):
+        """Ask the webhook to build this app's branch tip again (this service never runs git or
+        Docker). Only an app a connected repo deploys; one waiting request per app."""
+        status, reply, result = 200, {"ok": True}, "ok"
+        try:
+            with db() as conn:
+                repo = repos_mod.repo_for_app(conn, app)
+            if deploy_mod.PREVIEW_SEP in app or not repo:
+                status, reply, result = 409, {"error": f"{app} is not deployed from GitHub, so there is nothing to redeploy "
+                                                       "(upload a new zip instead)"}, "refused"
+            elif not repos_mod.request_redeploy(DB_PATH.parent, app):
+                status, reply, result = 409, {"error": f"a redeploy of {app} is already waiting"}, "refused"
+            else:
+                reply = {"ok": True, "repo": repo}
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"redeploy {app}: {type(e).__name__}", flush=True)
+            status, reply, result = 500, {"error": "the redeploy request could not be written; "
+                                                   "see journalctl -u mini-deploy-admin"}, "error"
+        try:
+            with db() as conn:
+                audit(conn, "redeploy", app, result)
+        except Exception as e:  # noqa: BLE001  (the request stands; say so, do not hide it)
+            print(f"audit write failed: {type(e).__name__}", flush=True)
+            reply["warning"] = "done, but the audit log could not be written"
+        return self._json(status, reply)
+
     def _action(self, raw):
         try:
             data = json.loads(raw.decode("utf-8"))
@@ -612,6 +638,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "unknown action"})
         if not isinstance(app, str) or not deploy_mod.APP_RE.fullmatch(app) or app in deploy_mod.RESERVED_APPS:
             return self._json(400, {"error": "bad app name"})
+        if action == "redeploy":
+            return self._redeploy(app)
         if not (deploy_mod.SITES / app / "releases").is_dir():
             return self._json(404, {"error": "no such app"})
         if action != "unhold" and not (isinstance(expect, str) and deploy_mod.ID_RE.fullmatch(expect)):

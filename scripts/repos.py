@@ -21,6 +21,7 @@ import re
 import secrets
 import sqlite3
 import stat
+import time
 import sys
 from pathlib import Path
 
@@ -207,6 +208,48 @@ def repo_by_name(full_name):
         row = conn.execute("SELECT full_name, hook_id, app, branch, subdir, previews, kind, secret FROM repos "
                            "WHERE full_name = ? COLLATE NOCASE", (full_name,)).fetchone()
     return _full_row(row) if row else None
+
+
+def repo_name_for_app(app):
+    """The connected repo that deploys `app` (admin page, else config/webhook.json), or None."""
+    if not isinstance(app, str) or not deploy_mod.APP_RE.fullmatch(app):
+        return None
+    with admindb.db() as conn:
+        return repo_for_app(conn, app)
+
+
+# ---------------------------------------------------------------- redeploy requests (admin page -> webhook)
+# The admin page cannot run git or Docker. "Redeploy" writes <app>.json into this root-only folder;
+# the webhook picks it up, checks the app is still connected, and builds that repo's branch tip.
+# One file per app, so one waiting request per app; the file holds nothing the webhook trusts.
+REDEPLOY_DIRNAME = "redeploy"
+REDEPLOY_NAME_RE = re.compile(r"^([a-z0-9-]{1,40})\.json$")
+REDEPLOY_STALE = 600   # the webhook drops requests older than this (webhook.REDEPLOY_MAX_AGE)
+
+
+def request_redeploy(state_dir, app):
+    """Write the request (admin side). Returns False if one for this app is already waiting."""
+    if not isinstance(app, str) or not deploy_mod.APP_RE.fullmatch(app):
+        raise ValueError("bad app name")
+    folder = Path(state_dir) / REDEPLOY_DIRNAME
+    folder.mkdir(mode=0o700, exist_ok=True)
+    st = os.lstat(folder)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        raise RuntimeError(f"{folder} is not a private folder of this user")
+    path = folder / f"{app}.json"
+    try:
+        # A request older than the webhook would act on (it was down) is stale: replace it.
+        if time.time() - os.lstat(path).st_mtime > REDEPLOY_STALE:
+            os.unlink(path)
+    except FileNotFoundError:
+        pass
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump({"app": app}, fh)
+    return True
 
 
 # ---------------------------------------------------------------- the GitHub token

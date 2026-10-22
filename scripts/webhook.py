@@ -37,7 +37,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import stat
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -308,6 +310,10 @@ class Jobs:
             # (the branch is gone), and a build never falls back to a removal.
             both_builds = replaced is not None and job.get("action", "build") == "build" \
                 and replaced.get("action", "build") == "build"
+            # A redeploy never joins a fallback chain: it builds the tip anyway, and as a fallback
+            # it would lift a hold that nobody just asked to lift.
+            if both_builds and (job.get("redeploy") or replaced.get("redeploy")):
+                both_builds = False
             if both_builds:
                 job["fallback"] = replaced
                 depth, node = 0, job
@@ -453,6 +459,8 @@ def load_pending(state):
         elif not (cfg["previews"] and safe_branch(branch) and branch != cfg["branch"]):
             return None                                     # previews were switched off, or junk
         job = make_job(cfg, repo, sha, delivery, branch, action)
+        if raw.get("redeploy") is True and branch is None and action == "build":
+            job["redeploy"] = True   # survives a restart as what it was: the owner's own request
         # A fallback is built without the tip check, so it must be exactly what submit()
         # would have made: a build of the same repo and branch, at most 3 deep.
         fb = raw.get("fallback")
@@ -820,9 +828,13 @@ def remote_tip(job, allow_file):
 
 
 def run_job(job, allow_file, check_tip=True):
-    """Returns (status, release): ok, removed, held, same, gone or stale. Raises on a real failure."""
+    """Returns (status, release): ok, removed, held, same, gone or stale. Raises on a real failure.
+    A redeploy (the owner pressed Redeploy on the admin page) builds the tip again even if it is
+    already live, and lifts a hold instead of being stopped by it, like any manual deploy."""
     app_root = deploy_mod.SITES / job["app"]
     preview = deploy_mod.preview_parent(job["app"]) is not None
+    # Only the head of a chain (check_tip) may act as a redeploy: a fallback never lifts a hold.
+    redeploy = job.get("redeploy") is True and not preview and job.get("action", "build") == "build" and check_tip
     if job.get("action") == "remove":
         if not app_root.is_dir():
             return "gone", None                           # nothing to take down: no git call at all
@@ -835,14 +847,18 @@ def run_job(job, allow_file, check_tip=True):
 
     if preview:
         deploy_mod.check_preview(job["app"], job["branch"])  # its own branch, at most MAX_PREVIEWS
-    if deploy_mod.is_held(app_root):                      # a rollback is in force
+    held_at_start = deploy_mod.is_held(app_root)
+    if not redeploy and held_at_start:                    # a rollback is in force
         return "held", None
+    # A redeploy lifts only a hold that was there when it started (the owner asked for it while
+    # the app was held). A rollback made while it builds stops it, as it stops any push.
+    lift = redeploy and held_at_start
     deployed = read_deployed(app_root)
     try:
         live = deploy_mod.current_id(app_root / "current")
     except deploy_mod.DeployError:
         live = None
-    if deployed.get("sha") == job["sha"] and deployed.get("release") == live:
+    if not redeploy and deployed.get("sha") == job["sha"] and deployed.get("release") == live:
         return "same", None                               # this exact commit is already live
 
     if check_tip:
@@ -877,10 +893,10 @@ def run_job(job, allow_file, check_tip=True):
                 # working site down (404 at /). Refused; the live release stays.
                 if not (build_dir / "index.html").is_file():
                     raise deploy_mod.DeployError(f"no index.html in '{job['subdir']}'; nothing was deployed")
-                release = deploy_mod.deploy(job["app"], build_dir, refuse_if_held=True)
+                release = deploy_mod.deploy(job["app"], build_dir, refuse_if_held=not lift, lift_hold=lift)
             else:
                 release = build_mod.build_and_deploy(job["app"], build_dir, commit=job["sha"],
-                                                     refuse_if_held=True)
+                                                     refuse_if_held=not lift, lift_hold=lift)
         except deploy_mod.HeldError:
             return "held", None
     finally:
@@ -958,6 +974,115 @@ def worker(state, allow_file):
         finally:
             state.jobs.done(job)  # no longer needs saving (a busy retry was re-queued itself)
         sweep_hook_dirs()
+
+
+# ---------------------------------------------------------------- redeploy requests from the admin page
+
+REDEPLOY_EVERY = 2.0      # seconds between looks at the request folder
+REDEPLOY_MAX_BYTES = 1024
+REDEPLOY_MAX_AGE = 600    # seconds: an older request (the webhook was down) is dropped, never acted on
+
+
+def find_repo_for_app(state, app):
+    """(repo name, its config) for the live app `app`, from config/webhook.json or the admin
+    database; (None, None) if no repo deploys it. Raises RepoDBError if the database cannot answer."""
+    for full_name, cfg in state.config["repos"].items():
+        if cfg["app"] == app:
+            return full_name, cfg
+    full_name = db_lookup(repos_mod.repo_name_for_app, app)
+    if not full_name:
+        return None, None
+    cfg = db_lookup(repos_mod.repo_by_name, full_name)
+    return (full_name, cfg) if cfg and cfg["app"] == app else (None, None)
+
+
+def _read_request(path):
+    """(raw bytes, age in seconds) of one request file, or None if it is not a small regular
+    file. Never follows a link, never waits on a FIFO."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > REDEPLOY_MAX_BYTES:
+            return None
+        return os.read(fd, REDEPLOY_MAX_BYTES + 1), time.time() - st.st_mtime
+    finally:
+        os.close(fd)
+
+
+def take_redeploy_requests(state, allow_file):
+    """One look at the folder: every well-formed request becomes a queued build of that app's
+    branch tip. Nothing in the file is trusted beyond the app name, and that name must match
+    the file name and belong to a connected repo. A request older than REDEPLOY_MAX_AGE is
+    dropped (the webhook was down: acting on it now could undo a rollback made since). A file
+    is removed once it is decided; while the server is stopping, requests stay for next time."""
+    folder = state.state_dir / repos_mod.REDEPLOY_DIRNAME
+    try:
+        st = os.lstat(folder)
+    except FileNotFoundError:
+        return 0
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
+        state.log_reject("the redeploy request folder is not private; requests ignored")
+        return 0
+    taken = 0
+    for name in sorted(os.listdir(folder))[:20]:
+        if state.stop.is_set() or state.jobs.frozen:
+            break                                   # stopping: leave the rest for the next start
+        path = folder / name
+        m = repos_mod.REDEPLOY_NAME_RE.fullmatch(name)
+        got = _read_request(path) if m else None
+        app = m.group(1) if m else None
+        try:
+            data = json.loads(got[0].decode("utf-8")) if got else None
+        except (ValueError, UnicodeError, RecursionError):
+            data = None
+        if not (isinstance(data, dict) and data.get("app") == app and deploy_mod.APP_RE.fullmatch(app or "")
+                and deploy_mod.preview_parent(app) is None):
+            with contextlib.suppress(OSError):
+                path.unlink()                       # a link is removed itself, never followed
+            state.log("rejected", "a redeploy request that does not look like one")
+            continue
+        started = time.monotonic()
+        if got[1] > REDEPLOY_MAX_AGE:
+            with contextlib.suppress(OSError):
+                path.unlink()
+            deploy_mod.log_event(app, "webhook", None, "fail", started,
+                                 f"redeploy: the request is {int(got[1] // 60)} min old; not acted on (press Redeploy again)")
+            continue
+        try:
+            full_name, cfg = find_repo_for_app(state, app)
+            if cfg is None:
+                deploy_mod.log_event(app, "webhook", None, "fail", started, "redeploy: no connected repo deploys this app")
+                continue
+            delivery = str(uuid.uuid4())   # its own id, so it never collides with a GitHub delivery
+            job = make_job(cfg, full_name, "0" * 40, delivery)
+            sha = remote_tip(job, allow_file)
+            if not sha:
+                deploy_mod.log_event(app, "webhook", None, "fail", started, f"{full_name} redeploy: branch {cfg['branch']} not found")
+                continue
+            if state.stop.is_set() or state.jobs.frozen:
+                break                               # the queue is being saved: keep the request
+            job["sha"], job["redeploy"] = sha, True
+            state.jobs.submit(job)
+            state.log("queued", f"{full_name} {sha[:7]} build {delivery} (redeploy)", app)
+            taken += 1
+        except (RepoDBError, GitError) as e:
+            deploy_mod.log_event(app, "webhook", None, "fail", started, f"redeploy: {type(e).__name__}: {e}")
+        finally:
+            if not (state.stop.is_set() or state.jobs.frozen):
+                with contextlib.suppress(OSError):
+                    path.unlink()                   # decided (queued or failed): the owner can press again
+    return taken
+
+
+def redeploy_watcher(state, allow_file):
+    while not state.stop.wait(REDEPLOY_EVERY):
+        try:
+            take_redeploy_requests(state, allow_file)
+        except Exception as e:  # noqa: BLE001  (the watcher must keep watching)
+            print(f"redeploy watcher: {type(e).__name__}", file=sys.stderr, flush=True)
 
 
 # ---------------------------------------------------------------- start up
@@ -1046,6 +1171,8 @@ def main():
     # still queued are saved to disk instead of being lost.
     state.worker = threading.Thread(target=worker, args=(state, args.allow_file_urls))
     state.worker.start()
+    # The admin page's "Redeploy" requests (a daemon: it only ever queues, never builds).
+    threading.Thread(target=redeploy_watcher, args=(state, args.allow_file_urls), daemon=True).start()
 
     def stop(*_):
         threading.Thread(target=server.shutdown, daemon=True).start()
