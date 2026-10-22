@@ -526,5 +526,48 @@ else
 fi
 
 echo
+echo "== 11. the admin page's café colours are readable, by day and by night =="
+python3 - "$REPO/web/admin/admin.css" <<'PY' || fail=1
+import re, sys
+css = open(sys.argv[1], encoding="utf-8").read()
+light = css[css.index(":root {"):css.index("@media (prefers-color-scheme: dark)")]
+dark = css[css.index('@media (prefers-color-scheme: dark)'):css.index(':root[data-theme="dark"]')]
+dark_toggle = css[css.index(':root[data-theme="dark"]'):]
+dark_toggle = dark_toggle[:dark_toggle.index("}") + 1]
+def toks(block):
+    return {m.group(1): m.group(2) for m in re.finditer(r"--([a-z0-9-]+-c):\s*(#[0-9A-Fa-f]{6})", block)}
+def rgb(h): h = h.lstrip("#"); return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+def lum(c):
+    f = lambda v: v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (f(v / 255) for v in c); return 0.2126 * r + 0.7152 * g + 0.0722 * b
+def ratio(a, b):
+    la, lb = lum(rgb(a)), lum(rgb(b)); return (max(la, lb) + 0.05) / (min(la, lb) + 0.05)
+L = toks(light); bad = 0
+D = dict(L); D.update(toks(dark))
+DT = dict(L); DT.update(toks(dark_toggle))
+if {k: v for k, v in D.items()} != {k: v for k, v in DT.items()}:
+    print("FAIL  the dark colours differ between the system setting and the dark toggle"); bad += 1
+else:
+    print("ok    the dark colours are the same for the system setting and the dark toggle")
+PAIRS = [("ink-c", "oat-c"), ("ink-c", "surface-c"), ("ink-c", "surface2-c"), ("ink-c", "foam-c"),
+         ("muted-c", "oat-c"), ("muted-c", "surface-c"), ("muted-c", "surface2-c"),
+         ("pinkink-c", "surface-c"), ("pinkink-c", "foam-c"), ("pinkink-c", "oat-c"),
+         ("on-coffee-c", "coffee-c"), ("ok-c", "okbg-c"), ("warn-c", "warnbg-c"), ("bad-c", "badbg-c"),
+         ("ok-c", "surface-c"), ("bad-c", "surface-c"), ("pinkink-c", "surface2-c")]
+for theme, t in (("day", L), ("night", D)):
+    for fg, bg in PAIRS:
+        r = ratio(t[fg], t[bg])
+        ok = r >= 4.5; bad += not ok
+        print(("ok    " if ok else "FAIL  ") + f"{theme}: {fg} on {bg}: {r:.1f}:1")
+# the espresso card stays dark in both themes (fixed colours in admin.css)
+for fg in ("#F5E8E2", "#E9D9CF", "#9EE3BE", "#FFB3C9"):
+    r = ratio(fg, "#2B1E1A"); ok = r >= 4.5; bad += not ok
+    print(("ok    " if ok else "FAIL  ") + f"espresso card: {fg} on #2B1E1A: {r:.1f}:1")
+print(("ok    " if "prefers-reduced-motion: reduce" in css else "FAIL  ") + "all admin motion stops when the device asks for less")
+bad += "prefers-reduced-motion: reduce" not in css
+sys.exit(1 if bad else 0)
+PY
+
+echo
 if [ "$fail" -eq 0 ]; then echo "ALL PASSED"; else echo "SOMETHING FAILED"; fi
 exit $fail
