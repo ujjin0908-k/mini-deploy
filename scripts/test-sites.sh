@@ -4,8 +4,9 @@
 # and safe (no HTML injection). The Wi-Fi dashboard page is retired (2026-10-15); section 7
 # checks it stays gone. Needs Docker and Caddy (current Caddyfile) running.
 #
-# This DEPLOYS two test apps: demo-site and mini-deploy (the landing page), plus one
-# hooktest-<pid> app. It never deletes anything; remove them afterwards.
+# This DEPLOYS two test apps: demo-site (built in Docker) and mini-deploy (the same sample's
+# plain folder, no build), plus one hooktest-<pid> app. It never deletes anything; remove them
+# afterwards (clean-test-leftovers.py).
 set -uo pipefail
 
 REPO=/mnt/c/Users/indra/Code/mini-deploy
@@ -18,7 +19,7 @@ get()  { curl -s -m 5 -w ' [%{http_code}]' --resolve "$1.localhost:8080:127.0.0.
 code() { curl -s -m 5 -o /dev/null -w '%{http_code}' --resolve "$1.localhost:8080:127.0.0.1" "http://$1.localhost:8080${2:-/}"; }
 
 echo "== 1. the theme copies are in step with the source =="
-for f in web/landing/style.css web/logs/style.css web/admin/style.css examples/static-site/src/style.css; do
+for f in web/logs/style.css web/admin/style.css examples/static-site/src/style.css; do
   if cmp -s "$REPO/web/theme/pink.css" "$REPO/$f"; then ok "$f matches web/theme/pink.css"
   else bad "$f is stale: run scripts/sync-theme.sh"; fi
 done
@@ -125,74 +126,6 @@ check("prefers-reduced-motion" in css and "mist-drift" in css.split("prefers-red
 sys.exit(1 if bad else 0)
 PY
 
-echo
-echo "== 2b. the *-explained folders are complete, accurate and accessible =="
-REPO=$REPO python3 - <<'PY' || fail=1
-import html, json, os, re, sys
-from pathlib import Path
-repo = Path(os.environ["REPO"])
-bad = 0
-def check(ok, msg):
-    global bad
-    print(("ok    " if ok else "FAIL  ") + msg)
-    bad += not ok
-
-pink = (repo / "web/theme/pink.css").read_bytes()
-explain = (repo / "web/theme/explain.css").read_bytes()
-real_top = {"generated_at", "apps", "events", "attention"}
-real_app = {"name", "live", "held", "deployed", "total", "releases"}
-real_event = {"ts", "app", "action", "release", "result", "duration", "detail"}
-
-check(not (repo / "dashboard-explained").exists(), "the retired dashboard's guide folder is gone")
-for name in ("demo-site-explained", "landing-explained"):
-    d = repo / name
-    files = {p.name for p in d.iterdir()} if d.is_dir() else set()
-    check({"index.html", "style.css", "explain.css", "README.md"} <= files, f"{name}: has index.html, style.css, explain.css, README.md")
-    if not d.is_dir():
-        continue
-    check(not any(f.startswith(".") for f in files), f"{name}: no dotfiles")
-    check((d / "style.css").read_bytes() == pink, f"{name}: style.css matches web/theme/pink.css")
-    check((d / "explain.css").read_bytes() == explain, f"{name}: explain.css matches web/theme/explain.css")
-
-    page = (d / "index.html").read_text(encoding="utf-8")
-    css = (d / "style.css").read_text(encoding="utf-8") + (d / "explain.css").read_text(encoding="utf-8")
-    outside = [m.group(0) for src in (page, css)
-               for m in re.finditer(r"https?://(?!([a-z0-9-]+\.)?localhost|www\.w3\.org/2000/svg)[^\s\"'<)]+", src)]
-    check(not outside, f"{name}: nothing is fetched from elsewhere" + (f" ({outside})" if outside else ""))
-    check("<script" not in page, f"{name}: no scripts at all")
-    check(page.count("<h1") == 1, f"{name}: exactly one <h1>")
-
-    svgs = re.findall(r"<svg\b[^>]*>.*?</svg>", page, flags=re.S)
-    ok_svg = all('role="img"' in s and "aria-labelledby=" in s and "<title" in s and "<desc" in s for s in svgs)
-    check(len(svgs) >= 2 and ok_svg, f"{name}: {len(svgs)} diagrams, each with a title and a description")
-
-    ids = re.findall(r'\bid="([^"]+)"', page)
-    check(len(ids) == len(set(ids)), f"{name}: element ids are unique")
-    missing = [h for h in re.findall(r'href="#([^"]+)"', page) if h not in ids]
-    check(not missing, f"{name}: every in-page link has a target" + (f" ({missing})" if missing else ""))
-
-    files_named = re.findall(r'<code class="file">([^<]+)</code>', page)
-    gone = [f for f in files_named if not (repo / html.unescape(f)).exists()]
-    check(files_named and not gone, f"{name}: {len(files_named)} file names mentioned, all exist" + (f" (missing {gone})" if gone else ""))
-
-    for m in re.finditer(r'<pre class="code" data-json>(.*?)</pre>', page, flags=re.S):
-        try:
-            data = json.loads(html.unescape(re.sub(r"<[^>]+>", "", m.group(1))))
-            keys_ok = (set(data) <= real_top
-                       and all(set(a) <= real_app for a in data.get("apps", []))
-                       and all(set(e) <= real_event for e in data.get("events", [])))
-            check(keys_ok, f"{name}: the data.json example parses and uses only real field names")
-        except ValueError as e:
-            check(False, f"{name}: the data.json example is not valid JSON ({e})")
-sys.exit(1 if bad else 0)
-PY
-
-if exp=$(python3 "$REPO/scripts/export-diagrams.py" --out "$SRC/svg" 2>&1) \
-   && [ "$(ls "$SRC/svg"/*.svg 2>/dev/null | wc -l)" = 6 ]; then
-  ok "all 6 drawings export as standalone, well-formed .svg files (the Obsidian pictures)"
-else
-  bad "diagram export failed: $exp"
-fi
 
 echo
 echo "== 3. log lines cannot inject anything, and bad lines are dropped =="
@@ -255,7 +188,7 @@ PY
 
 echo
 echo "== 4. deploy the two sites =="
-if python3 "$REPO/scripts/deploy.py" deploy mini-deploy "$REPO/web/landing" >/dev/null; then ok "landing deployed"; else bad "landing deploy failed"; fi
+if python3 "$REPO/scripts/deploy.py" deploy mini-deploy "$REPO/examples/static-site/src" >/dev/null; then ok "a plain folder deployed (no build)"; else bad "plain folder deploy failed"; fi
 if python3 "$REPO/scripts/build.py" build demo-site "$REPO/examples/static-site" >/dev/null 2>&1; then ok "demo-site built in Docker and deployed"; else bad "demo-site build failed"; fi
 
 for app in mini-deploy demo-site; do
@@ -264,7 +197,7 @@ for app in mini-deploy demo-site; do
 done
 get demo-site / | grep -q 'built with node v' && ok "demo page was built (stamp present)" || bad "demo page has no build stamp"
 get demo-site / | grep -q '__BUILT' && bad "demo page has an unreplaced placeholder"
-get mini-deploy / | grep -q 'A small, self-hosted deploy platform' && ok "landing page content is there" || bad "landing page content missing"
+get mini-deploy / | grep -q 'static-site, built with' && ok "the plain folder's page is served as it is" || bad "plain folder page content missing"
 
 echo
 echo "== 5. the app list (what the admin page shows) matches the real state =="

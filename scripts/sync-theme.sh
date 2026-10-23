@@ -1,18 +1,12 @@
 #!/usr/bin/env bash
-# Copy the shared theme next to each site's HTML. Every site is its own deployed app
-# (and the demo site is built from a repo checkout), so each one needs its own copy.
-# Edit web/theme/pink.css (the look) and web/theme/explain.css (diagram pieces for the
-# *-explained pages) only, then run this. test-sites.sh fails if a copy is stale.
+# Copy the shared theme next to each site's HTML. Each site is served on its own (and the demo
+# site is built from a repo checkout), so each one needs its own copy.
+# Edit web/theme/pink.css only, then run this. test-sites.sh fails if a copy is stale.
+# (The admin page's café look is web/admin/admin.css, laid over this copy.)
 set -euo pipefail
 REPO=/mnt/c/Users/indra/Code/mini-deploy
 
-for dest in web/landing/style.css web/logs/style.css web/admin/style.css examples/static-site/src/style.css \
-            demo-site-explained/style.css landing-explained/style.css; do
+for dest in web/logs/style.css web/admin/style.css examples/static-site/src/style.css; do
   cp "$REPO/web/theme/pink.css" "$REPO/$dest"
-  echo "synced $dest"
-done
-
-for dest in demo-site-explained/explain.css landing-explained/explain.css; do
-  cp "$REPO/web/theme/explain.css" "$REPO/$dest"
   echo "synced $dest"
 done
