@@ -33,8 +33,9 @@
 
   // ---------------------------------------------------------------- Bean, toasts (café look, 2026-10-23)
   var MOUTHS = {
-    idle: "M96 140 Q 101 144 106 140", happy: "M95 139 Q 101 146 107 139",
-    brewing: "M97 140 Q 101 145 105 140 Q 101 138 97 140", worried: "M96 143 Q 101 138 106 143"
+    idle: "M96 140 Q 101 144 106 140", happy: "M93 138 Q 101 149 109 138",
+    brewing: "M97 140 Q 101 145 105 140 Q 101 138 97 140", worried: "M96 143 Q 101 138 106 143",
+    sheepish: "M95 141 Q 98 137 101 141 Q 104 145 107 141"
   };
   var moodHold = null;   // a short mood after something the user did (rollback done, upload failed)
   function mood(state, line) {
@@ -159,7 +160,7 @@
           setTimeout(load, 2500);   // the webhook looks for requests every 2 s
         } else {
           toast(app + ": " + DONE[action] + (action === "unhold" ? "" : ". Pushes wait until you press Unhold."));
-          holdMood("happy", action === "unhold"
+          holdMood(action === "unhold" ? "happy" : "sheepish", action === "unhold"
             ? app + " takes pushes from GitHub again."
             : app + " is on another release now. I'm holding it, so a push can't undo that.", 8000);
         }
@@ -412,7 +413,16 @@
     if (push.stage === "brewing") {
       mood("brewing", "A push to " + appLabel(push.ev.app) + " came in. Brewing it now...");
     } else if (push.stage === "failed" && push.age < 1800) {
-      mood("worried", appLabel(push.ev.app) + "'s build failed, so I kept serving the old one. Nobody saw a broken page.");
+      // A smoke-test failure has its own words (see REASONS in dashboard.py): say what happened.
+      var detail = typeof push.ev.detail === "string" ? push.ev.detail : "";
+      var smoke = detail.indexOf("smoke test failed") === 0;
+      if (smoke && detail.indexOf("switched back") !== -1) {
+        mood("worried", appLabel(push.ev.app) + "'s new version did not load properly, so I switched back to the old one.");
+      } else if (smoke) {
+        mood("worried", appLabel(push.ev.app) + "'s new version did not load properly, and there was no older one to switch to.");
+      } else {
+        mood("worried", appLabel(push.ev.app) + "'s build failed, so I kept serving the old one. Nobody saw a broken page.");
+      }
     } else if (attention.length) {
       mood("worried", attention.join(", ") + (attention.length === 1 ? " needs" : " need") + " a look: the last run failed.");
     } else if (backup.stale) {

@@ -39,6 +39,9 @@ NOT_APPS = {"webhook", "invalid-name", OLD_PAGE}   # log "apps" that are not rea
 # What a failure is called on the page. First match wins; checked against the error
 # message only (the build-output tail is cut off first), so output cannot pick the label.
 REASONS = [
+    ("no earlier release", "smoke test failed, nothing to switch to"),   # before the general one
+    ("rolled back to", "smoke test failed, switched back"),
+    ("smoke test failed", "smoke test failed"),          # its own words, so no "git" or "missing or empty" match first
     ("env values", "env problem"),                       # before "git": a key may say GIT
     ("secret appears in dist", "refused: secret in output"),
     ("timed out", "timed out"),

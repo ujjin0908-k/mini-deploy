@@ -137,6 +137,11 @@ a { color: var(--pinkink-c); }
 .bean.happy .body { animation: md-hop 0.7s ease-out 2; }
 .bean.happy .sparkle { animation: md-sparkle 1.2s ease-out 2; }
 .bean.worried .sweat { opacity: 1; animation: md-drip 1.4s ease-in infinite; }
+/* the happy smile is drawn at the outline's weight (4.5 is the outline), not the thin mouth's 3 */
+.bean.happy #mouth { stroke-width: 4.5; }
+/* sheepish: a wavy mouth, a sweat drop and a little tilt, after "I switched it back for you" */
+.bean.sheepish .sweat { opacity: 1; }
+.bean.sheepish .body { transform: rotate(-4deg); transform-box: view-box; transform-origin: 100px 180px; }
 
 /* ---- the deploy track (real steps from the deploy log) */
 .track { padding: 1rem 1.3rem; display: grid; gap: 0.8rem; }

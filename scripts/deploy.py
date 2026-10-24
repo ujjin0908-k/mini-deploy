@@ -16,6 +16,10 @@ contain "--"; that keeps the two kinds of name apart.
 A rollback or rollforward puts the app on hold (webhook pushes are skipped and logged
 as "held") so the next push cannot silently undo it. A manual `deploy` or `unhold` lifts it.
 
+After the flip, a deploy checks the new release (smoke_test): its files must exist and its
+front page must answer 200 with a body. If not, it switches back to the previous release
+and holds the app, and the deploy is logged as a failure.
+
 Layout (runtime data lives in the WSL filesystem, not on /mnt/c):
 
     /sites/<app>/releases/<id>/
@@ -28,6 +32,7 @@ Standard library only. The same functions are reused by build.py and the webhook
 import argparse
 import fcntl
 import hashlib
+import http.client
 import os
 import re
 import secrets
@@ -35,6 +40,7 @@ import shutil
 import stat
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 
 SITES = Path("/sites")
@@ -478,10 +484,16 @@ def deploy(app, src, refuse_if_held=False, lift_hold=False):
         with locked(root):
             if refuse_if_held and is_held(root):
                 raise HeldError("on hold (rolled back while this was building); not deployed")
-            result = _deploy_locked(src, root, releases, current)
+            release_id, live = _deploy_locked(src, root, releases, current)
+            # The flip is one step, so the new release is already what visitors get. The
+            # smoke test checks that serving path; a failure switches back under this lock.
+            try:
+                smoke_test(app, root / "releases" / release_id)
+            except SmokeError as e:
+                _smoke_back(app, root, current, live, f"smoke test failed: {e}")
             if lift_hold:
                 _lift_hold(app, root)
-            return result
+            return release_id, live
     return _logged(app, "deploy", run)
 
 
@@ -493,6 +505,124 @@ def _lift_hold(app, root):
     except OSError as e:
         print(f"warning: {app} is live, but its hold could not be lifted ({type(e).__name__}); "
               f"run: deploy.py unhold {app}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------- smoke test
+
+class SmokeError(DeployError):
+    """The new release does not serve a working page. deploy() switches back on this."""
+
+
+SMOKE_HOST = "127.0.0.1"
+SMOKE_PORT = 8080               # our Caddy (mini-deploy-caddy), loopback only
+SMOKE_TRIES = 3                 # Caddy reads from disk at once; retries only cover a slow start
+SMOKE_PAUSE = 1.0               # seconds between tries
+SMOKE_TIMEOUT = 5               # seconds per request
+SMOKE_READ_MAX = 1024 * 1024    # a page or file is read this far at most
+
+# Local files a page loads: script, stylesheet, icon and image sources.
+REF_RE = re.compile(r"""<(?:script|link|img)\b[^>]*?\s(?:src|href)\s*=\s*["']([^"'#?]+)["']""", re.I)
+
+
+def smoke_test(app, release):
+    """Refuse a release whose front page is empty or whose own files are missing. Two parts:
+      1. On disk, no network: index.html has content, and every local file it loads exists
+         inside the release. A build that forgets its assets fails here.
+      2. Over HTTP through our Caddy, the way a visitor gets it: the front page and each of
+         those files answer 200. If Caddy cannot be reached, only part 1 counts (warning).
+    A single-page app passes: its shell is the page, and its script is one of the files."""
+    refs = _smoke_files(release)
+    target = _smoke_target()
+    if target is None:  # tests only: the HTTP part is off unless a test points it somewhere
+        return
+    host, port = target
+    try:
+        for attempt in range(SMOKE_TRIES):
+            try:
+                _smoke_http(host, port, app, refs)
+                return
+            except SmokeError:
+                if attempt == SMOKE_TRIES - 1:
+                    raise
+                time.sleep(SMOKE_PAUSE)
+    except (OSError, http.client.HTTPException) as e:
+        # Caddy is not answering (stopped, restarting). That says nothing about the release,
+        # so it is not a reason to switch back; the log line says the HTTP part was skipped.
+        print(f"warning: smoke test HTTP part skipped, could not reach the server "
+              f"({type(e).__name__})", file=sys.stderr)
+
+
+def _smoke_files(release):
+    """Part 1. Returns the local references of index.html (paths as the page writes them)."""
+    index = release / "index.html"
+    if index.is_symlink() or not index.is_file():
+        raise SmokeError("no index.html at the top of the new release")
+    with open(index, "rb") as fh:
+        text = fh.read(SMOKE_READ_MAX).decode("utf-8", "replace")
+    if not text.strip():
+        raise SmokeError("index.html is empty")
+    refs = []
+    for ref in sorted(set(REF_RE.findall(text))):
+        if ref.startswith("//") or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", ref):
+            continue  # another site (https:, data:, ...), not a file of this release
+        rel = Path(ref.lstrip("/"))
+        if ".." in rel.parts:
+            raise SmokeError(f"{ref} points outside the site")
+        target = release / rel
+        if target.is_symlink() or not target.is_file():
+            raise SmokeError(f"{ref} is missing from the new release")
+        refs.append(ref)
+    return refs
+
+
+def _smoke_target():
+    """(host, port) for part 2, or None to skip it. Tests may point it at a test server with
+    MINI_DEPLOY_SMOKE_URL (only with MINI_DEPLOY_TESTING=1, like the other test overrides).
+    Without a test server, only the real /sites is checked: Caddy serves /sites and nothing
+    else, so a deploy into another folder (a test's temp folder) would be judged by a 404."""
+    if os.environ.get("MINI_DEPLOY_TESTING") == "1":
+        url = os.environ.get("MINI_DEPLOY_SMOKE_URL")
+        if not url:
+            return None
+        parts = urllib.parse.urlsplit(url)
+        if parts.scheme != "http" or not parts.hostname or parts.port is None:
+            raise DeployError("MINI_DEPLOY_SMOKE_URL must look like http://127.0.0.1:<port>")
+        return (parts.hostname, parts.port)
+    if SITES != Path("/sites"):
+        return None
+    return (SMOKE_HOST, SMOKE_PORT)
+
+
+def _smoke_http(host, port, app, refs):
+    """Part 2. The front page and each local file must answer 200; the page must have a body.
+    A new connection per request keeps a large file from leaving a half-read socket behind."""
+    for path in ["/"] + ["/" + urllib.parse.quote(r.lstrip("/")) for r in refs]:
+        conn = http.client.HTTPConnection(host, port, timeout=SMOKE_TIMEOUT)
+        try:
+            # The Host header picks the app, the same way a visitor's browser does.
+            conn.request("GET", path, headers={"Host": f"{app}.localhost"})
+            resp = conn.getresponse()
+            body = resp.read(SMOKE_READ_MAX)
+        finally:
+            conn.close()
+        if resp.status != 200:
+            raise SmokeError(f"{path} answered {resp.status}")
+        if path == "/" and not body.strip():
+            raise SmokeError("the front page answered 200 with an empty body")
+
+
+def _smoke_back(app, root, current, live, reason):
+    """Switch back to the release that was live before, and hold the app the way a manual
+    rollback does, so the next push cannot build over it. The caller holds the deploy lock."""
+    if live is None:
+        # The app's first release: there is no earlier one to switch to, so the new one stays
+        # up. The hold keeps webhook pushes from building over it until the owner decides.
+        set_hold(root)
+        raise DeployError(f"{reason}; no earlier release to go back to, so it stays live; "
+                          f"held: fix it, then deploy.py unhold {app}")
+    _flip_held(root, current, live)
+    raise DeployError(f"{reason}; rolled back to {live}; held: "
+                      f"deploy.py unhold {app} once it is fixed")
 
 
 # Names the platform keeps for itself. A manual deploy to one of these needs --force.

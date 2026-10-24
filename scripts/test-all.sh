@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Run every test suite, one after another, and print one line per suite.
-#   bash scripts/test-all.sh              all eight suites
+#   bash scripts/test-all.sh              all nine suites
 #   bash scripts/test-all.sh ci backup    only these
 #   bash scripts/test-all.sh --clean      afterwards, remove the suites' leftovers
 # Full output of each suite: /tmp/mini-deploy-suites/<name>.txt. Exit 1 if any suite failed.
 # Services must run the current code: restart them after editing a script (see CLAUDE.md).
 set -uo pipefail
 REPO=/mnt/c/Users/indra/Code/mini-deploy
-ALL=(deploy build webhook sites ci admin upload backup)
+ALL=(deploy build webhook sites ci admin upload backup smoke)
 clean=0
 names=()
 for a in "$@"; do
