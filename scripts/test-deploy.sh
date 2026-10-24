@@ -13,7 +13,11 @@ DEPLOY="python3 $REPO/scripts/deploy.py"
 APP=demo
 SRC=$(mktemp -d /tmp/mini-deploy-test-XXXXXX)   # fresh and unpredictable
 LOG=$SRC/requests.log
-LOGFILE=/var/log/mini-deploy.log
+# The command-line runs below log to a temp file, never the live deploy log (its failure lines
+# would show on the admin page). They still go to the real Caddy and /sites, which is the point
+# of this test, so the smoke check runs against Caddy too.
+LOGFILE=$SRC/deploy.log
+export MINI_DEPLOY_TESTING=1 MINI_DEPLOY_LOG=$LOGFILE MINI_DEPLOY_SMOKE_URL=http://127.0.0.1:8080
 fail=0
 
 ok()  { echo "ok    $*"; }

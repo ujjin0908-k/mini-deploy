@@ -20,7 +20,11 @@ STATE=$SRC/state
 PORT=9101
 APP=hook-test
 RUN=$(python3 -c 'import secrets; print(secrets.token_hex(4))')   # makes markers unique per run
-LOGFILE=/var/log/mini-deploy.log
+# The server this suite starts logs to a temp file, never the live deploy log (the admin page's
+# "needs a look" reads that). It still deploys to the real Caddy and /sites, so the smoke check
+# runs against Caddy, as it does live.
+LOGFILE=$SRC/deploy.log
+export MINI_DEPLOY_TESTING=1 MINI_DEPLOY_LOG=$LOGFILE
 URL=http://127.0.0.1:$PORT/webhook
 SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))')   # never printed, never exported
 LOG_BASE=$(wc -l < "$LOGFILE" 2>/dev/null || echo 0)
@@ -65,7 +69,7 @@ restore_build() { g checkout -q HEAD~1 -- build.js; g commit -q -m "fix the buil
 
 CONFIG=$SRC/webhook.json   # section 14 switches to a config with previews on
 start_server() {  # extra server flags...
-  WEBHOOK_SECRET=$SECRET python3 "$REPO/scripts/webhook.py" --config "$CONFIG" \
+  WEBHOOK_SECRET=$SECRET MINI_DEPLOY_SMOKE_URL=http://127.0.0.1:8080 python3 "$REPO/scripts/webhook.py" --config "$CONFIG" \
     --state-dir "$STATE" --env-file "$SRC/no-such-env" --allow-file-urls "$@" >>"$SRC/server.out" 2>&1 &
   SPID=$!
   local i
@@ -464,7 +468,7 @@ live = d.current_id(cur)
 check(live in d.release_ids(rels) and len(d.release_ids(rels)) == 2, "after a rollback the older live release is still there")
 d.deploy(rp, src)
 ids = d.release_ids(rels)
-check(d.current_id(cur) in ids and len(ids) == 2, f"the next deploy keeps 2, including the live one ({ids})")
+check(d.current_id(cur) in ids and len(ids) == 3, f"the next deploy keeps the 2 newest plus the one rolled back to, incl. the live one ({ids})")
 
 # --- git ls-remote: only the exact ref counts
 real_git = w.git

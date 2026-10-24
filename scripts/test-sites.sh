@@ -11,6 +11,9 @@ set -uo pipefail
 
 REPO=/mnt/c/Users/indra/Code/mini-deploy
 SRC=$(mktemp -d /tmp/mini-deploy-sites-test-XXXXXX)
+# The command-line deploys below log to a temp file, never the live deploy log. They still go to
+# the real Caddy and /sites (this suite checks the live sites), so the smoke check runs against Caddy.
+export MINI_DEPLOY_TESTING=1 MINI_DEPLOY_LOG=$SRC/deploy.log MINI_DEPLOY_SMOKE_URL=http://127.0.0.1:8080
 fail=0
 
 ok()  { echo "ok    $*"; }

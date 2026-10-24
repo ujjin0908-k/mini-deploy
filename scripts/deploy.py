@@ -45,6 +45,11 @@ from pathlib import Path
 
 SITES = Path("/sites")
 LOG_FILE = Path("/var/log/mini-deploy.log")
+# Tests only (MINI_DEPLOY_TESTING=1): a test run may send its log lines to a temp file, so the
+# live deploy log and the admin page's "needs a look" never see test failures. Without the
+# test flag the variable is ignored, like the other test overrides.
+if os.environ.get("MINI_DEPLOY_TESTING") == "1" and os.environ.get("MINI_DEPLOY_LOG"):
+    LOG_FILE = Path(os.environ["MINI_DEPLOY_LOG"])
 
 # Same rule the Caddyfile applies to the Host header. App names end up in file
 # paths, so they are checked here before any path is built from them.
@@ -389,17 +394,19 @@ def cleanup_stale(root, releases):
             print(f"warning: could not remove {p}: {e}", file=sys.stderr)
 
 
-def prune(releases, live, keep=KEEP):
-    """Delete old releases, never the live one. Warns instead of failing: by the time
-    this runs the new release is already live, so a cleanup error is not a failed deploy.
+def prune(releases, live, keep=KEEP, protect=None):
+    """Delete old releases, never the live one or `protect` (the release a switch back needs).
+    Warns instead of failing: by the time this runs the new release is already live, so a
+    cleanup error is not a failed deploy.
 
     Each release is renamed to .tmp-del-<id> first (one step, so a half-deleted folder
     can never match a release id and be rolled back to), then removed.
     """
     ids = release_ids(releases)
     keep_set = set(ids[-keep:]) if keep > 0 else set()
-    if live:
-        keep_set.add(live)
+    for rid in (live, protect):
+        if rid:
+            keep_set.add(rid)
     for rid in ids:
         if rid in keep_set:
             continue
@@ -445,7 +452,9 @@ def _deploy_locked(src, root, releases, current):
 
     os.sync()  # file data reaches disk before `current` points at it
     flip(root, current, release_id)
-    prune(releases, release_id, keep=keep)
+    # The previous live release is kept too: if this new one fails the smoke test, the switch
+    # back needs it (a rolled-back app may be on an old release that is no longer in the newest).
+    prune(releases, release_id, keep=keep, protect=live)
     return release_id, live
 
 
@@ -490,7 +499,7 @@ def deploy(app, src, refuse_if_held=False, lift_hold=False):
             try:
                 smoke_test(app, root / "releases" / release_id)
             except SmokeError as e:
-                _smoke_back(app, root, current, live, f"smoke test failed: {e}")
+                _smoke_back(app, root, current, live, f"smoke test failed: {e}", release_id)
             if lift_hold:
                 _lift_hold(app, root)
             return release_id, live
@@ -520,8 +529,14 @@ SMOKE_PAUSE = 1.0               # seconds between tries
 SMOKE_TIMEOUT = 5               # seconds per request
 SMOKE_READ_MAX = 1024 * 1024    # a page or file is read this far at most
 
-# Local files a page loads: script, stylesheet, icon and image sources.
-REF_RE = re.compile(r"""<(?:script|link|img)\b[^>]*?\s(?:src|href)\s*=\s*["']([^"'#?]+)["']""", re.I)
+SMOKE_MAX_REFS = 200            # more local files than this in one page is refused, not walked
+
+# The files a page needs to show: <script src> and the link kinds that load a file (stylesheet,
+# icon, preload, manifest). Each tag and attribute is matched with a bounded gap, so a crafted
+# page cannot make the match take a long time while the deploy lock is held.
+TAG_RE = re.compile(r"<(script|link)\b([^>]{0,1000})>", re.I)
+ATTR_RE = re.compile(r"""\b(src|href|rel)\s*=\s*["']([^"']{0,1000})["']""", re.I)
+LINK_RELS = {"stylesheet", "icon", "modulepreload", "manifest"}
 
 
 def smoke_test(app, release):
@@ -536,16 +551,20 @@ def smoke_test(app, release):
     if target is None:  # tests only: the HTTP part is off unless a test points it somewhere
         return
     host, port = target
+    failure = None
     try:
         for attempt in range(SMOKE_TRIES):
             try:
                 _smoke_http(host, port, app, refs)
                 return
-            except SmokeError:
+            except SmokeError as e:
+                failure = e  # a real answer: remembered, so a later connection error cannot hide it
                 if attempt == SMOKE_TRIES - 1:
                     raise
                 time.sleep(SMOKE_PAUSE)
     except (OSError, http.client.HTTPException) as e:
+        if failure is not None:
+            raise failure  # the server did answer, and the answer was wrong
         # Caddy is not answering (stopped, restarting). That says nothing about the release,
         # so it is not a reason to switch back; the log line says the HTTP part was skipped.
         print(f"warning: smoke test HTTP part skipped, could not reach the server "
@@ -553,26 +572,64 @@ def smoke_test(app, release):
 
 
 def _smoke_files(release):
-    """Part 1. Returns the local references of index.html (paths as the page writes them)."""
+    """Part 1. Returns the local files the page loads, as paths relative to the site root."""
     index = release / "index.html"
     if index.is_symlink() or not index.is_file():
         raise SmokeError("no index.html at the top of the new release")
     with open(index, "rb") as fh:
-        text = fh.read(SMOKE_READ_MAX).decode("utf-8", "replace")
+        text = _strip_comments(fh.read(SMOKE_READ_MAX).decode("utf-8", "replace"))
     if not text.strip():
         raise SmokeError("index.html is empty")
-    refs = []
-    for ref in sorted(set(REF_RE.findall(text))):
+    refs = set()
+    for tag, attrs_text in TAG_RE.findall(text):
+        attrs = {k.lower(): v for k, v in ATTR_RE.findall(attrs_text)}
+        if tag.lower() == "script":
+            ref = attrs.get("src")
+        elif set(attrs.get("rel", "").lower().split()) & LINK_RELS:
+            ref = attrs.get("href")
+        else:
+            continue  # a canonical link, a route, a home link: not a file the page loads
+        if not ref:
+            continue
+        ref = urllib.parse.unquote(ref)
         if ref.startswith("//") or re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*:", ref):
             continue  # another site (https:, data:, ...), not a file of this release
+        if ref.endswith("/") or ref.lstrip("/") == "":
+            continue  # a folder, not a file: the server answers it, the disk has no such file
+        refs.add(ref)
+    if len(refs) > SMOKE_MAX_REFS:
+        raise SmokeError(f"the page loads {len(refs)} local files; more than {SMOKE_MAX_REFS} is refused")
+    checked = []
+    for ref in sorted(refs):
         rel = Path(ref.lstrip("/"))
         if ".." in rel.parts:
-            raise SmokeError(f"{ref} points outside the site")
+            raise SmokeError(f"{safe_text(ref)} points outside the site")
         target = release / rel
         if target.is_symlink() or not target.is_file():
-            raise SmokeError(f"{ref} is missing from the new release")
-        refs.append(ref)
-    return refs
+            raise SmokeError(f"{safe_text(ref)} is missing from the new release")
+        checked.append(ref)
+    return checked
+
+
+def _strip_comments(text):
+    """Remove <!-- ... --> blocks. A plain find() loop: a regex here could be slow on a page
+    with many unclosed comment openers."""
+    out, pos = [], 0
+    while True:
+        start = text.find("<!--", pos)
+        if start < 0:
+            out.append(text[pos:])
+            return "".join(out)
+        out.append(text[pos:start])
+        end = text.find("-->", start + 4)
+        if end < 0:
+            return "".join(out)
+        pos = end + 3
+
+
+def safe_text(s):
+    """A page-chosen name, short and printable, for an error message (the admin API sends it on)."""
+    return re.sub(r"[^\x20-\x7e]", "?", s)[:80]
 
 
 def _smoke_target():
@@ -606,21 +663,35 @@ def _smoke_http(host, port, app, refs):
         finally:
             conn.close()
         if resp.status != 200:
-            raise SmokeError(f"{path} answered {resp.status}")
+            raise SmokeError(f"{safe_text(path)} answered {resp.status}")
         if path == "/" and not body.strip():
             raise SmokeError("the front page answered 200 with an empty body")
 
 
-def _smoke_back(app, root, current, live, reason):
+def _smoke_back(app, root, current, live, reason, failed):
     """Switch back to the release that was live before, and hold the app the way a manual
-    rollback does, so the next push cannot build over it. The caller holds the deploy lock."""
+    rollback does, so the next push cannot build over it. The caller holds the deploy lock.
+    failed: the release that did not pass; it is removed after the switch, so roll forward
+    and the next prune never meet it again (the reason and its id stay in the log)."""
     if live is None:
         # The app's first release: there is no earlier one to switch to, so the new one stays
         # up. The hold keeps webhook pushes from building over it until the owner decides.
         set_hold(root)
         raise DeployError(f"{reason}; no earlier release to go back to, so it stays live; "
                           f"held: fix it, then deploy.py unhold {app}")
+    releases = root / "releases"
+    if not (releases / live).is_dir() or (releases / live).is_symlink():
+        # Nothing to switch back to (removed by hand, or never there): keep the new one, held.
+        set_hold(root)
+        raise DeployError(f"{reason}; the previous release {live} is gone, so the new one "
+                          f"STILL LIVE: {failed}; held: fix it, then deploy.py unhold {app}")
     _flip_held(root, current, live)
+    gone = releases / f".tmp-del-{failed}"
+    try:
+        os.rename(releases / failed, gone)
+        shutil.rmtree(gone, ignore_errors=True)
+    except OSError as e:
+        print(f"warning: could not remove the failed release {failed}: {e}", file=sys.stderr)
     raise DeployError(f"{reason}; rolled back to {live}; held: "
                       f"deploy.py unhold {app} once it is fixed")
 

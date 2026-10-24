@@ -13,6 +13,9 @@ REPO=/mnt/c/Users/indra/Code/mini-deploy
 BUILD="python3 $REPO/scripts/build.py build"
 EXAMPLE="$REPO/examples/static-site"
 SRC=$(mktemp -d /tmp/mini-deploy-btest-XXXXXX)   # fresh and unpredictable
+# Build lines go to a temp log, never the live deploy log. Builds still go to the real Caddy.
+LOGFILE=$SRC/deploy.log
+export MINI_DEPLOY_TESTING=1 MINI_DEPLOY_LOG=$LOGFILE MINI_DEPLOY_SMOKE_URL=http://127.0.0.1:8080
 APP=demo-site
 fail=0
 
@@ -338,7 +341,7 @@ el=$(newest $ENVAPP)
 grep -q "$SECRET" "$el" && bad "the secret is in the build log" || ok "build log has no secret"
 grep -q '^env: API_TOKEN, PUBLIC_URL$' "$el" && ok "the log header lists the names only" || bad "env header: $(grep '^env' "$el")"
 grep -rq "$SECRET" "/sites/$ENVAPP/" && bad "the secret is in /sites" || ok "the secret is nowhere in the release"
-grep -q "$SECRET" /var/log/mini-deploy.log && bad "the secret is in the deploy log" || ok "deploy log has no secret"
+grep -q "$SECRET" "$LOGFILE" && bad "the secret is in the deploy log" || ok "deploy log has no secret"
 
 # A build that puts the secret into the site is refused; the live page stays.
 before=$(link_of $ENVAPP)

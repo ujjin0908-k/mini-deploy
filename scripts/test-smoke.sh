@@ -160,6 +160,50 @@ e = deploy_app("smk-three", make_src("x1", '<link rel="stylesheet" href="/broken
 check(e is None, "with no test URL, only the disk checks run (a 500 file is not seen)")
 ERRORS.clear()
 
+# The switch back needs the release it goes back to, even an old one. Six good deploys keep only
+# the newest five; roll back to the oldest kept one, then a bad deploy must not delete it.
+OLD = "smk-five"
+for n in range(6):
+    check(deploy_app(OLD, make_src("o%d" % n, GOOD, FILES)) is None, "setup: good release %d goes live" % (n + 1))
+old_ids = deploy.release_ids(deploy.SITES / OLD / "releases")
+with contextlib.redirect_stdout(io.StringIO()):
+    deploy.rollback(OLD, old_ids[0])
+e = deploy_app(OLD, make_src("ob", "   \n"))
+check(e is not None and ("rolled back to %s" % old_ids[0]) in e, "a bad deploy after an old rollback names the old release")
+check(live(OLD) == old_ids[0] and (deploy.SITES / OLD / "releases" / old_ids[0]).is_dir(),
+      "the old release it went back to still exists and is live (not pruned by the failed deploy)")
+
+# A failed release is removed after the switch back: roll forward and prune never meet it.
+GONE = "smk-six"
+check(deploy_app(GONE, make_src("g1", GOOD, FILES)) is None, "setup: first release goes live")
+g1 = live(GONE)
+e = deploy_app(GONE, make_src("g2", "   \n"))
+check(e is not None and deploy.release_ids(deploy.SITES / GONE / "releases") == [g1],
+      "the failed release is removed after the switch back")
+time.sleep(1.1)
+try:
+    with contextlib.redirect_stdout(io.StringIO()):
+        deploy.deploy(GONE, make_src("g3", GOOD, FILES), refuse_if_held=True)
+    held_ok = False
+except deploy.HeldError:
+    held_ok = True
+check(held_ok, "after the failure the app is held: a fallback push cannot build over it")
+
+# Page content that only looks like a file reference does not roll a good release back.
+e = deploy_app("smk-seven", make_src("c1", '<link rel="canonical" href="/">'
+               '<!-- <script src="gone.js"></script> --><script src="app.js"></script><p>ok</p>', FILES))
+check(e is None, "a canonical link to / and a commented-out script do not count as files")
+
+# More than 200 local files is refused, not walked.
+many = "".join('<script src="s%d.js"></script>' % i for i in range(201))
+e = deploy_app("smk-eight", make_src("m1", many))
+check(e is not None and "more than 200" in e, "a page with more than 200 local files is refused")
+
+# A crafted page cannot make the reference check slow (it runs under the deploy lock).
+t0 = time.monotonic()
+deploy._smoke_files(make_src("z1", "<script " * 100000))
+check(time.monotonic() - t0 < 3, "a 800 KB page of unfinished tags is checked in under 3 s (%.2f s)" % (time.monotonic() - t0))
+
 # Outside the test setting, a folder other than /sites is not checked over HTTP either (Caddy
 # serves only /sites): the webhook tests deploy into temp folders this way.
 os.environ.pop("MINI_DEPLOY_TESTING")
